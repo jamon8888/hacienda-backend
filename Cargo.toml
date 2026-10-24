@@ -7,10 +7,17 @@ description = "Bridge between CertaMesh/gaze (fail-closed PII pseudonymization) 
 publish = true
 
 [dependencies]
+async-trait = "0.1.92"
+gaze-assembly = "=0.17.0"
+gaze-pii = "=0.17.0"
 # Exact pin: the composition seam (register_post_processor same-name replacement,
 # extract_with_external_redaction, findings shape) was contract-verified against 1.3.9.
 # Bumping means re-running the ADR-0001 verification first (ADR-0002 fingerprint covers config, not crate drift).
-xberg = "=1.3.9"
+# "redaction" feature: the external-findings rewrite engine is feature-gated.
+xberg = { version = "=1.3.9", features = ["redaction"] }
 
 [profile.release]
 lto = "thin"
+
+[dev-dependencies]
+tokio = { version = "1.54.1", features = ["macros", "rt-multi-thread"] }
