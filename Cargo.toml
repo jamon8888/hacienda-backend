@@ -1,0 +1,16 @@
+[package]
+name = "hacienda-backend"
+version = "0.1.0"
+edition = "2024"
+resolver = "3"
+description = "Bridge between CertaMesh/gaze (fail-closed PII pseudonymization) and the basemind agent context layer"
+publish = true
+
+[dependencies]
+# Exact pin: the composition seam (register_post_processor same-name replacement,
+# extract_with_external_redaction, findings shape) was contract-verified against 1.3.9.
+# Bumping means re-running the ADR-0001 verification first (ADR-0002 fingerprint covers config, not crate drift).
+xberg = "=1.3.9"
+
+[profile.release]
+lto = "thin"
