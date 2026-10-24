@@ -64,6 +64,28 @@ impl GazeRedactor {
     pub fn register(self) -> xberg::Result<()> {
         xberg::plugins::register_post_processor(Arc::new(self))
     }
+
+    /// Startup seam (ADR-0001 doctor): register as the same-name replacement of
+    /// the built-in `"redaction"` processor, then verify the registry lists
+    /// exactly our instance. Call once before serving extraction traffic.
+    ///
+    /// # Errors
+    /// Fails closed when registration fails or post-registration verification
+    /// cannot see a `"redaction"` instance — never start half-installed.
+    pub fn install(engine: GazeEngine) -> xberg::Result<()> {
+        Self::new(engine).register()?;
+        let listed = xberg::plugins::list_post_processors();
+        if listed.iter().flatten().any(|name| name == "redaction") {
+            Ok(())
+        } else {
+            Err(XbergError::Plugin {
+                message: format!(
+                    "post-registration verification failed: no 'redaction' instance listed (registry: {listed:?})"
+                ),
+                plugin_name: env!("CARGO_PKG_NAME").to_owned(),
+            })
+        }
+    }
 }
 
 #[async_trait]
