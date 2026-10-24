@@ -4,8 +4,7 @@ The bridge between [CertaMesh/gaze](https://github.com/CertaMesh/gaze) (fail-clo
 consumed as a dependency) and [jamon8888/basemind](https://github.com/jamon8888/basemind) (the agent context
 layer — xberg extraction, document RAG over Fjall + LanceDB, MCP server, vault).
 
-**Status: spec phase.** No implementation yet. The architecture, its locked decisions and the evidence
-behind them live here:
+**Status: workspace scaffolded** ([ticket #2](https://github.com/jamon8888/hacienda-backend/issues/2)). Implementation proceeds by workstream epics — [Epic 1: bridge scaffold + GazeRedactor plugin](https://github.com/jamon8888/hacienda-backend/issues/1) is the current frontier. The architecture, its locked decisions and the evidence behind them live here:
 
 - [Architecture spec](docs/spec.md)
 - [ADR-0001 Composition contract](docs/adr/0001-composition-contract.md)
