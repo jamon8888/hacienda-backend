@@ -69,6 +69,19 @@ impl GazeEngine {
         Self::from_config(CorePipelineConfig::new())
     }
 
+    /// Core floor plus extra bundled rulepacks (e.g. `"secrets"` for the
+    /// credential classes — spec §2 one-way candidates).
+    ///
+    /// # Errors
+    /// Fails closed when the pipeline cannot be built.
+    pub fn core_floor_with(rulepack_ids: &[&str]) -> Result<Self, EngineError> {
+        let mut config = CorePipelineConfig::new();
+        for id in rulepack_ids {
+            config = config.with_bundled_rulepack(id);
+        }
+        Self::from_config(config)
+    }
+
     /// Test-only engine that always fails detection (ADR-0003: fail-closed, never
     /// degrade).
     pub fn broken(reason: impl Into<String>) -> Self {
