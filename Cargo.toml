@@ -15,6 +15,18 @@ serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.140"
 toml = "0.8.19"
 uuid = { version = "1.11.0", features = ["v4", "serde"] }
+# CLI argument parsing
+clap = { version = "4.5.19", features = ["derive", "env"] }
+# Terminal interaction (confirmation prompts)
+dialoguer = "0.11.0"
+# Colored output
+console = "0.15.8"
+# Time handling for audit logs
+chrono = { version = "0.4.38", features = ["serde"] }
+# Random passphrase generation
+rand = "0.9.0"
+# Async runtime (for CLI binary)
+tokio = { version = "1.54.1", features = ["rt", "macros"] }
 # HPKE for key encryption (vault map encryption at rest)
 hpke = "0.15.0"
 # Keychain access for macOS (vault key custody) - sync-keychain feature for Keychain
