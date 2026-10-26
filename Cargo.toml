@@ -15,39 +15,23 @@ serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.140"
 toml = "0.8.19"
 uuid = { version = "1.11.0", features = ["v4", "serde"] }
-# CLI argument parsing
+shellexpand = "0.1.0"
 clap = { version = "4.5.19", features = ["derive", "env"] }
-# Terminal interaction (confirmation prompts)
 dialoguer = "0.11.0"
-# Colored output
 console = "0.15.8"
-# Time handling for audit logs
 chrono = { version = "0.4.38", features = ["serde"] }
-# Random passphrase generation
 rand = "0.9.0"
-# Async runtime (for CLI binary)
 tokio = { version = "1.54.1", features = ["rt", "macros", "io-std"] }
-# MCP server
 rmcp = { version = "0.2.1", features = ["server-side-http", "transport-async-rw"] }
 axum = { version = "0.7.9", features = ["macros"] }
 tracing = "0.1.40"
 tower = "0.5.2"
 tower-http = { version = "0.5.2", features = ["cors"] }
-# File watching for folder sync
 notify = { version = "6.1.1", features = ["macos_fsevent"] }
-# Channel for sync pipeline
 crossbeam-channel = "0.5.13"
-# HPKE for key encryption (vault map encryption at rest)
 hpke = "0.15.0"
-# Keychain access for macOS (vault key custody) - sync-keychain feature for Keychain
 security-framework = { version = "3.7.0", features = ["sync-keychain"] }
-# Fingerprint hashing
 blake3 = "1.7.1"
-# Exact pin: the composition seam (register_post_processor same-name replacement,
-# extract_with_external_redaction, findings shape) was contract-verified against 1.3.9.
-# Bumping means re-running the ADR-0001 verification first (ADR-0002 fingerprint covers config, not crate drift).
-# "redaction" feature: the external-findings rewrite engine is feature-gated.
-# "redaction-rehydrate" feature: captures the token->original rehydration map (XPII\x01).
 xberg = { version = "=1.3.9", features = ["redaction", "redaction-rehydrate"] }
 
 [profile.release]
@@ -55,23 +39,8 @@ lto = "thin"
 
 [dev-dependencies]
 tokio = { version = "1.54.1", features = ["macros", "rt-multi-thread"] }
-
-# Ticket #5: fixture corpus needs the Office + PDF engines. Declared again
-# here so the runtime dependency surface stays minimal (redaction only).
 zip = "9.0.2"
-# "excel" is a separate feature from "office" (the ExcelExtractor registers
-# under `cfg(any(feature = "excel", feature = "excel-wasm"))`); without it the
-# spreadsheet MIME fails with UnsupportedFormat.
 xberg = { version = "=1.3.9", features = ["office", "pdf", "excel"] }
 
-# Intel macOS workaround (hacienda-backend#5): ort-sys 2.0.0-rc.12 (pinned by
-# gaze-recognizers 0.17.0) ships no prebuilt ONNX Runtime for
-# x86_64-apple-darwin, so its build script fails closed. `load-dynamic` maps
-# to ort-sys/disable-linking: no download, no linking; ort dlopens a dylib
-# (ORT_DYLIB_PATH) only if its API is actually used — the harness never does
-# (NER/GLiNER is opt-in and not configured here). Target-gated so every other
-# platform keeps the prebuilt-binary default. Dependency-local by design; the
-# upstream fix (pin ort to rc.13, which added x86_64-apple-darwin prebuilts)
-# is a tracked upstream-contribution candidate, out of scope for this map.
 [target.'cfg(all(target_os = "macos", target_arch = "x86_64"))'.dependencies]
 ort = { version = "=2.0.0-rc.12", features = ["load-dynamic"] }
