@@ -5,6 +5,7 @@
 //! ADR-0001 (composition contract) in `docs/`.
 
 use gaze_assembly::CorePipelineConfig;
+use uuid::Uuid;
 
 /// One detected PII span, in original-text byte offsets (ADR-0004: these are the
 /// canonical offsets).
@@ -90,13 +91,66 @@ impl GazeEngine {
         }
     }
 
-    /// Detect PII spans on `text`.
+    /// Detect PII spans on `text` and capture the session manifest.
     ///
-    /// A fresh gaze `Session` per call keeps detection state document-scoped,
-    /// mirroring basemind's per-document token surface. The pipeline call also
-    /// pseudonymizes internally to produce the trace; its token text is
-    /// discarded — xberg's TokenCounter mints the tokens that survive
-    /// (ADR-0001).
+    /// Returns both the detections and the exported session manifest bytes.
+    /// The manifest is a sensitive snapshot containing token-to-PII mappings
+    /// and evidence tiers — treat as sensitive as the original document.
+    ///
+    /// Uses a `Scope::Conversation` with a generated ID so the session can be
+    /// exported (ephemeral sessions cannot be exported).
+    ///
+    /// # Errors
+    /// Fails closed on any gaze-side failure; never degrades to a fallback.
+    pub fn detect_with_manifest(
+        &self,
+        text: &str,
+    ) -> Result<(Vec<Detection>, Vec<u8>), EngineError> {
+        match &self.inner {
+            EngineInner::Broken(msg) => Err(EngineError::Broken(msg.clone())),
+            EngineInner::Real(core) => {
+                // Use Conversation scope so the session can be exported.
+                let conversation_id = Uuid::new_v4().to_string();
+                let session = gaze::Session::new(gaze::Scope::Conversation(conversation_id))
+                    .map_err(EngineError::Detect)?;
+                let policy = gaze::SafetyNetPolicy::new(
+                    gaze::SafetyNetMode::Resolve,
+                    gaze::SafetyNetFallback::Redact,
+                );
+                let (_, _, _, trace) = core
+                    .pipeline()
+                    .clean_text_with_safety_net_policy_detect_context_and_protection_trace(
+                        &session,
+                        text,
+                        &[gaze::LocaleTag::Global],
+                        &gaze::DictionaryBundle::default(),
+                        policy,
+                    )
+                    .map_err(EngineError::Detect)?;
+
+                // Export the session manifest (sensitive snapshot).
+                let manifest_bytes = session
+                    .export()
+                    .map_err(|e| EngineError::Broken(format!("session export failed: {e}")))?
+                    .into_bytes();
+
+                let detections = trace
+                    .into_iter()
+                    .map(|item| Detection {
+                        start: item.raw_start(),
+                        end: item.raw_end(),
+                        class: item.class().clone(),
+                    })
+                    .collect();
+
+                Ok((detections, manifest_bytes))
+            }
+        }
+    }
+
+    /// Detect PII spans on `text` (without manifest).
+    ///
+    /// Uses an ephemeral session since no manifest export is needed.
     ///
     /// # Errors
     /// Fails closed on any gaze-side failure; never degrades to a fallback.
