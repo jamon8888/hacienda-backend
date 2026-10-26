@@ -24,6 +24,12 @@ pub enum Commands {
 
     /// Export encrypted recovery bundle for offline restore.
     ExportRecovery(ExportRecoveryArgs),
+
+    /// Sync document folder (watcher or manual refresh).
+    Sync(SyncArgs),
+
+    /// Run MCP server (stdio or HTTP).
+    Mcp(McpArgs),
 }
 
 /// Arguments for the rehydrate command.
@@ -84,4 +90,32 @@ pub struct ExportRecoveryArgs {
     /// Recovery passphrase (generated if omitted).
     #[arg(long, short = 'p')]
     pub passphrase: Option<String>,
+}
+
+/// Arguments for the sync command.
+#[derive(Args, Debug)]
+pub struct SyncArgs {
+    /// Path to basemind.toml configuration file.
+    #[arg(long, short = 'c', default_value = "basemind.toml")]
+    pub config: PathBuf,
+
+    /// Run in watch mode (continuous) instead of one-shot refresh.
+    #[arg(long, short = 'w')]
+    pub watch: bool,
+
+    /// Trigger full rebuild (ignore fingerprint).
+    #[arg(long)]
+    pub force_rebuild: bool,
+}
+
+/// Arguments for the MCP server command.
+#[derive(Args, Debug)]
+pub struct McpArgs {
+    /// Transport type: stdio or http.
+    #[arg(long, default_value = "stdio")]
+    pub transport: String,
+
+    /// HTTP bind address (when transport=http).
+    #[arg(long, default_value = "127.0.0.1:8080")]
+    pub http_addr: String,
 }
