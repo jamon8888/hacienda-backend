@@ -1,10 +1,14 @@
 //! CLI for hacienda-backend: rehydration, audit, and doctor commands.
 
-use clap::{Parser, Subcommand, Args};
+use clap::{Args, Parser, Subcommand};
 use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
-#[command(name = "hacienda-backend", version, about = "PII-safe document backend for Claude")]
+#[command(
+    name = "hacienda-backend",
+    version,
+    about = "PII-safe document backend for Claude"
+)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Commands,

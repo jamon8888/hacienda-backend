@@ -9,8 +9,8 @@ use clap::Parser;
 use console::style;
 use hacienda_backend::{
     cli::{Cli, Commands},
-    doctor_checks, load_config, get_vault_passphrase, log_audit,
-    run_rehydrate, run_export_recovery,
+    doctor_checks, get_vault_passphrase, load_config, log_audit, run_export_recovery,
+    run_rehydrate,
 };
 use std::process;
 
@@ -34,7 +34,7 @@ fn run_command(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         Commands::Doctor(args) => {
             let config = load_config(&args.config)?;
             let errors = doctor_checks(&config);
-            
+
             match args.format.as_str() {
                 "json" => {
                     let output = serde_json::json!({
@@ -47,7 +47,7 @@ fn run_command(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 _ => {
                     println!("{} hacienda-backend doctor", style("▶").blue().bold());
                     println!("  Config: {}", args.config.display());
-                    
+
                     if errors.is_empty() {
                         println!("  {} All checks passed", style("✓").green());
                     } else {

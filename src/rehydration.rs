@@ -1,11 +1,11 @@
 //! Rehydration logic: decrypt vault map, restore entities/documents, audit logging.
 
+use crate::cli::{ExportRecoveryArgs, RehydrateArgs};
+use console::style;
+use dialoguer::Confirm;
 use std::fs;
 use std::path::Path;
-use dialoguer::Confirm;
-use console::style;
-use xberg::text::redaction::rehydration::{decrypt_map, RehydrationMap, encrypt_map};
-use crate::cli::{RehydrateArgs, ExportRecoveryArgs};
+use xberg::text::redaction::rehydration::{RehydrationMap, decrypt_map, encrypt_map};
 
 /// Errors from rehydration operations.
 #[derive(Debug, thiserror::Error)]
@@ -40,7 +40,10 @@ pub struct RehydrationAuditRecord {
 }
 
 /// Load vault map from XPII\x01 encrypted file.
-fn load_vault_map<P: AsRef<Path>>(path: P, passphrase: &str) -> Result<RehydrationMap, RehydrationError> {
+fn load_vault_map<P: AsRef<Path>>(
+    path: P,
+    passphrase: &str,
+) -> Result<RehydrationMap, RehydrationError> {
     let blob = fs::read(path)?;
     decrypt_map(&blob, passphrase).map_err(|e| RehydrationError::Decryption(e.to_string()))
 }
@@ -49,8 +52,6 @@ fn load_vault_map<P: AsRef<Path>>(path: P, passphrase: &str) -> Result<Rehydrati
 fn load_manifest<P: AsRef<Path>>(path: P) -> Result<Vec<u8>, RehydrationError> {
     fs::read(path).map_err(RehydrationError::Io)
 }
-
-
 
 /// Rehydrate a single entity token.
 pub fn rehydrate_entity(
@@ -64,10 +65,7 @@ pub fn rehydrate_entity(
 }
 
 /// Rehydrate a full document by replacing all tokens in the redacted content.
-pub fn rehydrate_document(
-    redacted_content: &str,
-    vault_map: &RehydrationMap,
-) -> String {
+pub fn rehydrate_document(redacted_content: &str, vault_map: &RehydrationMap) -> String {
     let mut result = redacted_content.to_owned();
     // Replace tokens in reverse order of length to avoid partial replacements
     let mut tokens: Vec<_> = vault_map.keys().collect();
@@ -83,9 +81,15 @@ pub fn rehydrate_document(
 /// Interactive confirmation prompt for rehydration.
 fn confirm_rehydration(scope: &str, is_full_doc: bool) -> Result<bool, RehydrationError> {
     let msg = if is_full_doc {
-        format!("Rehydrate FULL DOCUMENT '{}'? This will expose ALL PII in the document.", scope)
+        format!(
+            "Rehydrate FULL DOCUMENT '{}'? This will expose ALL PII in the document.",
+            scope
+        )
     } else {
-        format!("Rehydrate entity '{}'? This will expose the original PII value.", scope)
+        format!(
+            "Rehydrate entity '{}'? This will expose the original PII value.",
+            scope
+        )
     };
 
     let confirmation = Confirm::new()
@@ -179,7 +183,9 @@ pub async fn run_export_recovery(
         use rand::Rng;
         const CHARSET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
         let mut rng = rand::rng();
-        (0..32).map(|_| CHARSET[rng.random_range(0..CHARSET.len())] as char).collect()
+        (0..32)
+            .map(|_| CHARSET[rng.random_range(0..CHARSET.len())] as char)
+            .collect()
     });
 
     // Create recovery bundle: JSON with both encrypted blobs
@@ -200,19 +206,25 @@ pub async fn run_export_recovery(
     };
 
     let bundle_json = serde_json::to_vec(&bundle).map_err(RehydrationError::Json)?;
-    
+
     // Encrypt the entire bundle with the recovery passphrase
     // For simplicity, we'll just write the JSON (it contains encrypted blobs)
     fs::write(&args.output, &bundle_json).map_err(RehydrationError::Io)?;
 
-    eprintln!("{} Recovery bundle written to {}", 
+    eprintln!(
+        "{} Recovery bundle written to {}",
         style("✓").green().bold(),
-        style(args.output.display()).cyan());
-    eprintln!("{} Recovery passphrase: {}", 
+        style(args.output.display()).cyan()
+    );
+    eprintln!(
+        "{} Recovery passphrase: {}",
         style("🔑").yellow(),
-        style(&recovery_passphrase).bold());
-    eprintln!("{} Store this passphrase securely. It cannot be recovered.", 
-        style("⚠").yellow());
+        style(&recovery_passphrase).bold()
+    );
+    eprintln!(
+        "{} Store this passphrase securely. It cannot be recovered.",
+        style("⚠").yellow()
+    );
 
     Ok(())
 }
