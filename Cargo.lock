@@ -1541,6 +1541,7 @@ dependencies = [
  "gaze-assembly",
  "gaze-pii",
  "ort",
+ "thiserror 2.0.21",
  "tokio",
  "xberg",
  "zip 9.1.0",

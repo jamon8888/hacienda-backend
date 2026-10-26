@@ -10,6 +10,7 @@ publish = true
 async-trait = "0.1.92"
 gaze-assembly = "=0.17.0"
 gaze-pii = "=0.17.0"
+thiserror = "2.0.11"
 # Exact pin: the composition seam (register_post_processor same-name replacement,
 # extract_with_external_redaction, findings shape) was contract-verified against 1.3.9.
 # Bumping means re-running the ADR-0001 verification first (ADR-0002 fingerprint covers config, not crate drift).

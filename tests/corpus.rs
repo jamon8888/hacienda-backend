@@ -36,6 +36,7 @@ const PHONE: &str = "+1 212 555 0100";
 const PHONE_LABEL: &str = "PHONE";
 const SSN: &str = "SSN 536-90-4399";
 const SSN_LABEL: &str = "SSN";
+/// Canadian SIN-like (3-3-3 synthetic format).
 const TOKEN: &str = "AKIAQQQQTESTEXAMPLE0";
 const TOKEN_LABEL: &str = "SECURITY_TOKEN";
 /// password.field fires line-anchored; only the VALUE span is the finding.
@@ -576,6 +577,7 @@ async fn corpus_txt_mixed() {
         (PHONE_LABEL, PHONE),
         (SSN_LABEL, SSN),
         (TOKEN_LABEL, TOKEN),
+        (PASSWORD_LABEL, PASSWORD),
     ];
     let password_line = format!("password: {PASSWORD}\n");
     let body = format!(
@@ -588,14 +590,23 @@ async fn corpus_txt_mixed() {
     assert_tokens_present(
         "mixed.txt",
         &doc.content,
-        &[EMAIL_LABEL, IBAN_LABEL, CARD_LABEL, IP_LABEL, TOKEN_LABEL],
+        &[
+            EMAIL_LABEL,
+            IBAN_LABEL,
+            CARD_LABEL,
+            IP_LABEL,
+            TOKEN_LABEL,
+            PHONE_LABEL,
+            SSN_LABEL,
+        ],
     );
     cleanup().await;
 }
 
 /// Spec §2 one-way: `password` classes are configured for Drop — the value
-/// disappears (no rehydratable token) but surfaces as a Drop-class finding,
-/// while tokenized classes (email) still mint `[TYPE_N]`.
+/// is replaced with a visible `[REDACTED:PASSWORD]` marker (no rehydratable
+/// token) and surfaces as a Drop-class finding, while tokenized classes
+/// (email) still mint `[TYPE_N]`.
 #[tokio::test]
 async fn corpus_txt_one_way_password_drop() {
     let _guard = seq().lock().await;
@@ -639,8 +650,8 @@ async fn corpus_txt_one_way_password_drop() {
     for finding in &report.findings {
         if finding.strategy == xberg::RedactionStrategy::Drop {
             assert!(
-                finding.replacement_token.is_empty(),
-                "ONE-WAY: Drop replacement must be empty: {finding:?}"
+                finding.replacement_token == "[REDACTED:PASSWORD]",
+                "ONE-WAY: Drop replacement must be visible marker: {finding:?}"
             );
         }
     }
