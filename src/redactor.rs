@@ -30,7 +30,7 @@ use crate::gaze_engine::{Detection, EngineError, GazeEngine};
 
 /// Sentinel category that turns xberg's built-in pattern engine off while
 /// keeping Custom-labeled external findings flowing (`findings_config`).
-const BRIDGE_CATEGORY: &str = "gaze";
+pub const BRIDGE_CATEGORY: &str = "gaze";
 
 /// A discoverable label for a gaze class, used as the xberg external-finding
 /// label. xberg uppercases it for the token (`[EMAIL_1]`, `[CUSTOM_CARD_1]`).
@@ -118,7 +118,7 @@ fn findings_config(
 /// Errors that originate in the bridge (not in gaze itself), for precise
 /// diagnosis by callers (Sourcery #7).
 #[derive(Debug, thiserror::Error)]
-enum BridgeError {
+pub enum BridgeError {
     #[error("span offset {value} does not fit u32 wire offsets (in {context})")]
     OffsetOverflow { value: usize, context: String },
     #[error("overlapping one-way (`{name}`) and tokenized gaze spans — refusing ambiguous rewrite")]
