@@ -10,6 +10,7 @@ pub mod mcp_server;
 pub mod mcp_types;
 pub mod redactor;
 pub mod rehydration;
+pub mod search;
 
 pub use cli::{Cli, Commands, DoctorArgs, ExportRecoveryArgs, McpArgs, RehydrateArgs, SyncArgs};
 pub use cli_error::CliError;
@@ -28,6 +29,7 @@ pub use rehydration::{
     RehydrationAuditRecord, RehydrationError, get_vault_passphrase, log_audit, run_export_recovery,
     run_rehydrate,
 };
+pub use search::{SearchEngine, SearchParams, SearchResult, SearchFilter};
 
 /// Crate version, for diagnostics.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

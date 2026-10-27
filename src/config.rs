@@ -37,6 +37,10 @@ pub struct HaciendaConfig {
     /// NER/GLiNER configuration (opt-in).
     #[serde(default)]
     pub ner: NerConfig,
+
+    /// Document search configuration (hybrid BM25 + Vector + Lexical + RRF).
+    #[serde(default)]
+    pub documents: DocumentsConfig,
 }
 
 /// Redaction engine selector and policy.
@@ -245,6 +249,183 @@ impl Default for NerConfig {
     }
 }
 
+/// Document search configuration (hybrid BM25 + Vector + Lexical + RRF).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DocumentsConfig {
+    /// Enable embedding-based vector search.
+    #[serde(default = "default_documents_embed")]
+    pub embed: bool,
+
+    /// Embedding dimension (must match model output).
+    #[serde(default = "default_documents_dim")]
+    pub dim: usize,
+
+    /// Fusion configuration (RRF weights, relaxation).
+    #[serde(default)]
+    pub fusion: FusionConfig,
+
+    /// FTS/lexical configuration.
+    #[serde(default)]
+    pub fts: FtsConfig,
+
+    /// Output format configuration.
+    #[serde(default)]
+    pub output: OutputConfig,
+}
+
+fn default_documents_embed() -> bool {
+    false // Default to lexical-only (BM25) for fail-closed
+}
+
+fn default_documents_dim() -> usize {
+    384 // bge-small-en-v1.5 dimension
+}
+
+impl Default for DocumentsConfig {
+    fn default() -> Self {
+        Self {
+            embed: default_documents_embed(),
+            dim: default_documents_dim(),
+            fusion: FusionConfig::default(),
+            fts: FtsConfig::default(),
+            output: OutputConfig::default(),
+        }
+    }
+}
+
+/// Fusion (RRF) configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FusionConfig {
+    /// RRF k parameter (rank damping).
+    #[serde(default = "default_fusion_k")]
+    pub k: f32,
+
+    /// Maximum relaxation rounds for lexical search.
+    #[serde(default = "default_max_relaxations")]
+    pub max_relaxations: u32,
+
+    /// Per-lane weights (exact, vector, keyword, facet).
+    /// If not specified, uses basemind's document_lanes() defaults.
+    #[serde(default)]
+    pub weights: Option<FusionWeights>,
+}
+
+fn default_fusion_k() -> f32 {
+    60.0
+}
+
+fn default_max_relaxations() -> u32 {
+    3
+}
+
+impl Default for FusionConfig {
+    fn default() -> Self {
+        Self {
+            k: default_fusion_k(),
+            max_relaxations: default_max_relaxations(),
+            weights: None,
+        }
+    }
+}
+
+/// Per-lane RRF weights.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct FusionWeights {
+    /// Exact/identifier lane weight.
+    #[serde(default = "default_weight_3")]
+    pub exact: f32,
+    /// Vector/semantic lane weight.
+    #[serde(default = "default_weight_1")]
+    pub vector: f32,
+    /// Keyword/lexical lane weight.
+    #[serde(default = "default_weight_2")]
+    pub keyword: f32,
+    /// Facet prefilter lane weight.
+    #[serde(default = "default_weight_1")]
+    pub facet: f32,
+}
+
+fn default_weight_3() -> f32 { 3.0 }
+fn default_weight_1() -> f32 { 1.0 }
+fn default_weight_2() -> f32 { 2.0 }
+
+/// FTS/lexical configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FtsConfig {
+    /// Stemmer language (ISO 639-1 code, e.g., "en").
+    #[serde(default = "default_fts_language")]
+    pub stemmer_language: String,
+
+    /// Enable stemming.
+    #[serde(default = "default_fts_stem")]
+    pub stem: bool,
+
+    /// Remove stop words.
+    #[serde(default = "default_fts_stop")]
+    pub remove_stop_words: bool,
+
+    /// ASCII folding (normalize accents).
+    #[serde(default = "default_fts_ascii")]
+    pub ascii_folding: bool,
+
+    /// Maximum token length.
+    #[serde(default = "default_fts_max_token")]
+    pub max_token_length: u32,
+
+    /// Custom stop words.
+    #[serde(default)]
+    pub custom_stop_words: Vec<String>,
+}
+
+fn default_fts_language() -> String {
+    "en".to_owned()
+}
+fn default_fts_stem() -> bool {
+    true
+}
+fn default_fts_stop() -> bool {
+    false // Keep stop words for legal/identifier search
+}
+fn default_fts_ascii() -> bool {
+    true
+}
+fn default_fts_max_token() -> u32 {
+    64
+}
+
+impl Default for FtsConfig {
+    fn default() -> Self {
+        Self {
+            stemmer_language: default_fts_language(),
+            stem: default_fts_stem(),
+            remove_stop_words: default_fts_stop(),
+            ascii_folding: default_fts_ascii(),
+            max_token_length: default_fts_max_token(),
+            custom_stop_words: Vec::new(),
+        }
+    }
+}
+
+/// Output format configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OutputConfig {
+    /// Output format: "json" or "toon".
+    #[serde(default = "default_output_format")]
+    pub format: String,
+}
+
+fn default_output_format() -> String {
+    "json".to_owned()
+}
+
+impl Default for OutputConfig {
+    fn default() -> Self {
+        Self {
+            format: default_output_format(),
+        }
+    }
+}
+
 /// Errors from configuration loading/validation.
 #[derive(Debug, Error)]
 pub enum ConfigError {
@@ -385,4 +566,33 @@ pub fn doctor_checks(config: &HaciendaConfig) -> Vec<String> {
     // TODO: Validate policy hash matches stored fingerprint for existing documents.
 
     errors
+}
+
+impl HaciendaConfig {
+    /// Get the scope for document/memory isolation.
+    pub fn scope(&self) -> Option<String> {
+        // In a full basemind.toml, this would come from a top-level scope field.
+        // For now, return None to use default.
+        None
+    }
+
+    /// Get the LanceDB directory path.
+    pub fn lance_dir(&self) -> std::path::PathBuf {
+        shellexpand::tilde("~/.local/share/hacienda/lance").into_owned().into()
+    }
+
+    /// Get the embedding dimension.
+    pub fn embedding_dim(&self) -> u16 {
+        self.documents.dim as u16
+    }
+
+    /// Get the embedding model identifier.
+    pub fn embedding_model(&self) -> &str {
+        &self.embeddings.model
+    }
+
+    /// Get the embedding batch size.
+    pub fn embedding_batch_size(&self) -> Option<usize> {
+        Some(self.embeddings.batch_size)
+    }
 }

@@ -8,13 +8,14 @@
 use std::collections::HashSet;
 
 /// Sensitivity tier for index projection (ADR-0004 table).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, Default)]
 pub enum SensitivityTier {
     /// Name, Location, Organization — minimal suppression, searchable.
     Minimal,
     /// Email — low suppression, searchable with caveats.
     Low,
     /// Custom classes (credential-shaped) — HIGH fail-closed.
+    #[default]
     High,
     /// Credential-shaped customs (API keys, secrets) — HARD_BLOCK, never indexed.
     HardBlock,
