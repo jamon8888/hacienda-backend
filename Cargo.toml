@@ -6,10 +6,25 @@ resolver = "3"
 description = "Bridge between CertaMesh/gaze (fail-closed PII pseudonymization) and the basemind agent context layer"
 publish = true
 
+[features]
+default = ["bm25"]
+bm25 = []
+# Vector search via basemind's LanceStore (patched xberg 1.3.10 in /Users/macbook/xberg-patched)
+basemind = ["dep:basemind", "dep:lancedb", "dep:arrow"]
+vector = ["basemind"]
+# Cross-encoder reranking with ort (bge-reranker-v2-m3 ONNX)
+# On Linux/Windows: uses download-binaries feature
+rerank = ["dep:ort", "dep:ndarray", "dep:reqwest", "dep:tokenizers", "dep:sha2"]
+# On macOS: uses load-dynamic (requires ONNX Runtime installed via brew install onnxruntime)
+rerank-macos = ["rerank", "ort/load-dynamic"]
+
 [dependencies]
 async-trait = "0.1.92"
-gaze-assembly = "=0.17.0"
-gaze-pii = "=0.17.0"
+anyhow = "1.0.93"
+# PII core: pinned to the fork branch carrying the ort ^2.0.0-rc.13 relaxation.
+# (crates.io has no 0.17.0 gaze releases; keep version-free git deps here.)
+gaze-assembly = { git = "https://github.com/jamon8888/gaze", rev = "17ab8aec1be46595dd28b342d4a264d73e02d448" }
+gaze-pii = { git = "https://github.com/jamon8888/gaze", rev = "17ab8aec1be46595dd28b342d4a264d73e02d448" }
 thiserror = "2.0.11"
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.140"
@@ -19,7 +34,7 @@ shellexpand = "0.1.0"
 clap = { version = "4.5.19", features = ["derive", "env"] }
 dialoguer = "0.11.0"
 console = "0.15.8"
-chrono = { version = "0.4.38", features = ["serde"] }
+chrono = { version = "^0.4.39", features = ["serde"] }
 rand = "0.9.0"
 tokio = { version = "1.54.1", features = ["rt", "macros", "io-std"] }
 rmcp = { version = "0.2.1", features = ["server-side-http", "transport-async-rw"] }
@@ -32,15 +47,33 @@ crossbeam-channel = "0.5.13"
 hpke = "0.15.0"
 security-framework = { version = "3.7.0", features = ["sync-keychain"] }
 blake3 = "1.7.1"
-xberg = { version = "=1.3.9", features = ["redaction", "redaction-rehydrate"] }
+xberg = { version = "=1.3.10", features = ["embeddings", "redaction", "redaction-rehydrate"] }
 
-[profile.release]
-lto = "thin"
+# BM25 search dependencies (always available)
+tantivy = { version = "0.22.0", features = ["default"] }
+
+# Optional basemind integration (Epic 14) – vector + lexical search via basemind's LanceStore + FTS.
+# Pinned to the released 0.35.0 commit; requires xberg 1.3.10 (see .cargo/config.toml note).
+basemind = { git = "https://github.com/jamon8888/basemind", rev = "a25ab6b02dfe3baeb586a57539130bd761474f55", features = ["documents", "memory", "code-search", "comms"], optional = true }
+lancedb = { version = "0.40", optional = true }
+arrow = { version = "54", optional = true }
+
+# Optional cross-encoder reranking with ort (bge-reranker-v2-m3 ONNX)
+# On Linux/Windows: uses download-binaries feature
+# On macOS: uses load-dynamic (requires ONNX Runtime installed via brew install onnxruntime)
+ort = { version = "^2.0.0-rc.13", default-features = false, features = ["ndarray", "std", "download-binaries", "tls-rustls"], optional = true }
+ndarray = { version = "0.16", optional = true }
+reqwest = { version = "0.12", features = ["blocking"], optional = true }
+tokenizers = { version = "0.21", default-features = false, features = ["onig"], optional = true }
+sha2 = { version = "0.10", optional = true }
+
+[target.'cfg(all(target_os = "macos", target_arch = "x86_64"))'.dependencies]
+ort = { version = "^2.0.0-rc.13", default-features = false, features = ["ndarray", "std", "load-dynamic"] }
 
 [dev-dependencies]
 tokio = { version = "1.54.1", features = ["macros", "rt-multi-thread"] }
 zip = "9.0.2"
-xberg = { version = "=1.3.9", features = ["office", "pdf", "excel"] }
+xberg = { version = "=1.3.10", features = ["embeddings", "redaction", "redaction-rehydrate"] }
 
-[target.'cfg(all(target_os = "macos", target_arch = "x86_64"))'.dependencies]
-ort = { version = "=2.0.0-rc.12", features = ["load-dynamic"] }
+# NOTE: no [patch.crates-io] section here on purpose — machine-local overrides live
+# in an untracked .cargo/config.toml (see that file) so this manifest stays portable.
