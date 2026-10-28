@@ -8,7 +8,9 @@
 use std::collections::HashSet;
 
 /// Sensitivity tier for index projection (ADR-0004 table).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, Default,
+)]
 pub enum SensitivityTier {
     /// Name, Location, Organization — minimal suppression, searchable.
     Minimal,

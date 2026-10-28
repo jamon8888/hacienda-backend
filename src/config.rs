@@ -149,6 +149,11 @@ pub struct RerankerConfig {
     /// Cache directory for downloaded models.
     #[serde(default = "default_reranker_cache_dir")]
     pub cache_dir: String,
+
+    /// Optional pinned SHA-256 of the ONNX model binary. When set, a freshly
+    /// downloaded model is verified against this digest and rejected otherwise.
+    #[serde(default)]
+    pub sha256: Option<String>,
 }
 
 fn default_reranker_enabled() -> bool {
@@ -176,6 +181,7 @@ impl Default for RerankerConfig {
             batch_size: default_reranker_batch_size(),
             max_seq_len: default_max_seq_len(),
             cache_dir: default_reranker_cache_dir(),
+            sha256: None,
         }
     }
 }
@@ -329,7 +335,7 @@ impl Default for FusionConfig {
 }
 
 /// Per-lane RRF weights.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FusionWeights {
     /// Exact/identifier lane weight.
     #[serde(default = "default_weight_3")]
@@ -345,9 +351,28 @@ pub struct FusionWeights {
     pub facet: f32,
 }
 
-fn default_weight_3() -> f32 { 3.0 }
-fn default_weight_1() -> f32 { 1.0 }
-fn default_weight_2() -> f32 { 2.0 }
+impl Default for FusionWeights {
+    /// Must match the serde field defaults: a derived `Default` would return
+    /// 0.0 for every lane and silently disable fusion.
+    fn default() -> Self {
+        Self {
+            exact: default_weight_3(),
+            vector: default_weight_1(),
+            keyword: default_weight_2(),
+            facet: default_weight_1(),
+        }
+    }
+}
+
+fn default_weight_3() -> f32 {
+    3.0
+}
+fn default_weight_1() -> f32 {
+    1.0
+}
+fn default_weight_2() -> f32 {
+    2.0
+}
 
 /// FTS/lexical configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -578,7 +603,9 @@ impl HaciendaConfig {
 
     /// Get the LanceDB directory path.
     pub fn lance_dir(&self) -> std::path::PathBuf {
-        shellexpand::tilde("~/.local/share/hacienda/lance").into_owned().into()
+        shellexpand::tilde("~/.local/share/hacienda/lance")
+            .into_owned()
+            .into()
     }
 
     /// Get the embedding dimension.

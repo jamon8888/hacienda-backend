@@ -29,7 +29,7 @@ pub use rehydration::{
     RehydrationAuditRecord, RehydrationError, get_vault_passphrase, log_audit, run_export_recovery,
     run_rehydrate,
 };
-pub use search::{SearchEngine, SearchParams, SearchResult, SearchFilter};
+pub use search::{SearchEngine, SearchFilter, SearchParams, SearchResult};
 
 /// Crate version, for diagnostics.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
