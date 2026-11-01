@@ -118,4 +118,8 @@ pub struct McpArgs {
     /// HTTP bind address (when transport=http).
     #[arg(long, default_value = "127.0.0.1:8080")]
     pub http_addr: String,
+
+    /// Path to hacienda.toml (for sync tool).
+    #[arg(long)]
+    pub config: Option<PathBuf>,
 }

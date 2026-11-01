@@ -40,7 +40,7 @@ pub struct RehydrationAuditRecord {
 }
 
 /// Load vault map from XPII\x01 encrypted file.
-fn load_vault_map<P: AsRef<Path>>(
+pub fn load_vault_map<P: AsRef<Path>>(
     path: P,
     passphrase: &str,
 ) -> Result<RehydrationMap, RehydrationError> {

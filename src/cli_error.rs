@@ -22,7 +22,7 @@ pub enum CliError {
     Xberg(#[from] xberg::XbergError),
 
     #[error("MCP error: {0}")]
-    Mcp(#[from] rmcp::Error),
+    Mcp(#[from] rmcp::model::ErrorData),
 
     #[error("Tantivy error: {0}")]
     Tantivy(#[from] tantivy::TantivyError),

@@ -11,11 +11,13 @@ use clap::Parser;
 use console::style;
 use hacienda_backend::{
     DefaultResolver, McpServer,
+    audit::AuditLog,
     cli::{Cli, Commands, McpArgs},
     cli_error::CliError,
     doctor_checks, get_vault_passphrase, load_config, log_audit, run_export_recovery,
     run_manual_refresh, run_rehydrate,
 };
+use std::sync::Arc;
 use std::process;
 
 fn main() {
@@ -89,7 +91,22 @@ fn run_command(cli: Cli) -> Result<(), CliError> {
 
 async fn run_mcp(args: McpArgs) -> Result<(), CliError> {
     let resolver = DefaultResolver::new();
-    let server = McpServer::new(resolver);
+    let mut server = McpServer::new(resolver);
+
+    if let Some(config_path) = args.config {
+        server = server.with_config_path(config_path.clone());
+        // Initialize audit log next to config file
+        let audit_path = config_path.with_extension("audit.log");
+        let audit_log = AuditLog::new(&audit_path).await.map_err(|e| CliError::Other(e.to_string()))?;
+        server = server.with_audit_log(Arc::new(audit_log));
+    } else {
+        // Default audit log location
+        let audit_path = dirs::home_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join(".local/share/hacienda/audit.log");
+        let audit_log = AuditLog::new(&audit_path).await.map_err(|e| CliError::Other(e.to_string()))?;
+        server = server.with_audit_log(Arc::new(audit_log));
+    }
 
     match args.transport.as_str() {
         "stdio" => {
