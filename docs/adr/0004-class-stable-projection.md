@@ -23,8 +23,10 @@ gaze tokens are shape-preserving but not length-preserving.
 
 ## Decision
 
-**Embed and index exactly one projection: the class-stable projection (`<Class_…>` spelling), computed
-from the gaze policy vocabulary at the engine layer before chunking. BM25 scores the same projection.**
+**Gaze is the exclusive detection/redaction ingress; embed and index exactly one projection: the
+class-stable projection (`<Class_…>` spelling), computed from the gaze policy vocabulary at the engine
+layer before chunking. BM25 scores the same projection. No raw input bypasses Gaze into projection,
+indexing, or MCP.**
 Rules:
 
 - Raw session tokens never reach the index or a persisted blob.
@@ -39,8 +41,8 @@ Rules:
 
 ## Consequences
 
-- The bridge layer owns the projection step (see spec §6); gaz things like `gaze-token-bridge`'s
-  domain-alias template exist in-tree and are referenced, not invented here.
+- The bridge layer owns the projection step (see spec §6); gaze-token-bridge's domain-alias template
+  exists in-tree and is referenced, not invented here.
 - The blob cache regains deduplication across sessions; embedding cost drops accordingly.
 - The tier table lives beside the fingerprint config so a policy change is visibly also a rebuild.
 - Class-stable excepts are auditable: every persisted embedding is traceable to a document-fingerprint
@@ -52,4 +54,9 @@ Rules:
   cross-session stability of embeddings.
 - **Index format-preserving fakes** — rejected: BM25 ranks near-real text; lexical leakage surface.
 - **Embed original values** — rejected outright: the human-ward invariant (ADR-0003) makes real values
-  an input to indexing only for the manifest, never for any agent-scoped store.
+  an input to Gaze's owner-side detection/provenance flow only, never for projection, indexing, MCP, or
+  any agent-scoped store.
+
+## Workspace materialization clarification
+
+The class-stable projection is materialized as `clean.md` for the local workspace UI and as the only indexable form after watched-root xberg MIME/OCR extraction and Gaze redaction. The projection remains tenant- and engine-era-fingerprint-bound; raw workspace files, session tokens, and format-preserving fakes never enter `clean.md`, Tantivy, LanceDB, MCP, or provider egress.

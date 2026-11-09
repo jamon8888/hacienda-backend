@@ -28,10 +28,12 @@ is the tuple `engine id × token-grammar version × redaction config`, persisted
 generation. Per ingest run:
 
 - the **gaze manifest** is written to a persistent, owner-held store keyed by document id
-  (provenance/audit canonical);
-- the **vault rehydration map** is written in `XPII\x01` form (operational restore for basemind flows).
+  (canonical provenance; not restore authority and not the durable operational audit);
+- encrypted Gaze SensitiveSnapshot/session material and the encrypted **xberg TokenReplace map** are
+  written atomically as the jointly required restore material (`XPII\x01` map form for basemind flows).
 
-There is no second write path, so drift is structurally impossible. A fingerprint mismatch blocks
+The manifest, snapshot/session material, and TokenReplace map are all bound to the same document/content/
+tenant/engine-era/policy fingerprint. There is no second write path, so drift is structurally impossible. A fingerprint mismatch blocks
 cross-generation reuse (reads fail closed) and triggers an index rebuild per ADR-0004's policy. Offsets
 are persisted with the explicit `Utf8Bytes` encoding selected at composition time (xberg's default is
 code points), and no post-hoc token renames are permitted once persisted, because token length
@@ -39,8 +41,11 @@ determines chunk `byte_end` (basemind ADR-0015).
 
 ## Consequences
 
-- Keys and storage live owner-side (see ADR-0003): macOS Keychain custody, encrypted recovery export.
-- Index blobs and both stores carry the fingerprint; rebuild tooling keys on it.
+- Keys and storage live owner-side (see ADR-0003): macOS Keychain custody, encrypted recovery export;
+  fixed passphrases and insecure fallbacks are dev/test-only.
+- Index blobs and all restore/provenance stores carry the fingerprint; rebuild tooling keys on it.
+- Durable operational audit is separate metadata-only data, not a restatement of the manifest and not a
+  source of restore material.
 - The bridge repo owns the fingerprint computation and the consistency checks, in one place.
 - Multi-turn/projects flows keep working: gaze daemon sessions reference the persistent stores via
   projections, never store restore data themselves.
@@ -53,3 +58,7 @@ determines chunk `byte_end` (basemind ADR-0015).
   evidence tiers and conflict records; a later forensic restore or leak analysis fails.
 - **Dual-write with two independent write paths** — rejected: the whole point is *one* write path;
   two paths reintroduce the drift this ADR exists to prevent.
+
+## Operational boundary addendum
+
+The dual-store write is reached only from an allowed local or mounted network folder after watched-root xberg MIME/OCR extraction and fail-closed Gaze processing. The encrypted vault, provenance manifest, xberg map, and `clean.md`/class-stable projection carry the same document/content/tenant/engine-era/policy binding. Folder-sync bypass, disconnected roots, and in-memory-only index state are current implementation gaps, not exceptions to this decision.

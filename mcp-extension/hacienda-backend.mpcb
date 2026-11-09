@@ -1,0 +1,117 @@
+{
+  "name": "hacienda-backend",
+  "version": "0.1.0",
+  "description": "Hacienda Backend MCP Extension for Claude Desktop - development-only, noncompliant MCP integration for token-safe search, sync and status. Raw rehydration is not supported; do not use this extension as a recovery path. Production use requires token-only gateway/sidecar integration.",
+  "author": "jamon8888",
+  "license": "MIT",
+  "homepage": "https://github.com/jamon8888/hacienda-backend",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jamon8888/hacienda-backend"
+  },
+  "mcp": {
+    "version": "0.1.0",
+    "protocolVersion": "2024-11-05",
+    "capabilities": {
+      "tools": true,
+      "resources": true,
+      "prompts": false,
+      "logging": true
+    },
+    "tools": [
+      {
+        "name": "search",
+        "description": "Hybrid search (BM25 + Vector + Lexical + RRF) over indexed documents. Tenant-isolated. Returns snippets with gaze tokens (e.g., <4b31c7ee:Name_1>) - no PII exposed.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "tenant_id": { "type": "string", "description": "Tenant identifier (isolation key)" },
+            "query": { "type": "string", "description": "Search query" },
+            "top_k": { "type": "integer", "default": 10, "minimum": 1, "maximum": 100 },
+            "rerank": { "type": "boolean", "default": true },
+            "filter": {
+              "type": "object",
+              "properties": {
+                "connector": { "type": "string" },
+                "since": { "type": "string", "format": "date-time" }
+              }
+            }
+          },
+          "required": ["tenant_id", "query"]
+        }
+      },
+      {
+        "name": "sync",
+        "description": "Trigger incremental or full index rebuild.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "full": { "type": "boolean", "default": false }
+          }
+        }
+      },
+      {
+        "name": "status",
+        "description": "Index status: fingerprint and engine readiness.",
+        "inputSchema": { "type": "object", "properties": {} }
+      },
+      {
+        "name": "graph_entities",
+        "description": "Read-only Cypher query over the tenant's entity graph (GLiNER mentions + co-occurrence). Only MATCH, RETURN, WHERE, LIMIT, ORDER BY, WITH, UNION are allowed.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "tenant_id": { "type": "string", "description": "Tenant identifier (isolation key)" },
+            "cypher": { "type": "string", "description": "Read-only Cypher query string" },
+            "max_rows": { "type": "integer", "default": 200, "minimum": 1, "maximum": 1000 }
+          },
+          "required": ["tenant_id", "cypher"]
+        }
+      },
+      {
+        "name": "graph_rag",
+        "description": "GraphRAG: hybrid retrieval via entity graph expansion (vector lane + graph lane + fusion). Requires documents.embed = true.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "tenant_id": { "type": "string", "description": "Tenant identifier (isolation key)" },
+            "query": { "type": "string", "description": "Natural language query to embed and expand" },
+            "hops": { "type": "integer", "default": 2, "minimum": 1, "maximum": 2 },
+            "max_results": { "type": "integer", "default": 50, "minimum": 1, "maximum": 200 }
+          },
+          "required": ["tenant_id", "query"]
+        }
+      }
+    ],
+    "resources": [
+      {
+        "uri": "basemind://status",
+        "name": "System Status",
+        "description": "Current system status and health",
+        "mimeType": "application/json"
+      },
+      {
+        "uri": "basemind://repo/map",
+        "name": "Repository Map",
+        "description": "Repository structure and file map",
+        "mimeType": "application/json"
+      }
+    ],
+    "prompts": []
+  },
+  "runtime": {
+    "type": "stdio",
+    "command": "node",
+    "args": ["dist/index.js"],
+    "env": {}
+  },
+  "install": {
+    "method": "npm",
+    "package": "hacienda-backend",
+    "version": "0.1.0"
+  },
+  "requirements": {
+    "node": ">=20.0.0",
+    "binary": "hacienda-backend (must be in PATH or installed via cargo install hacienda-backend)"
+  }
+}

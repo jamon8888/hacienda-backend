@@ -1,9 +1,9 @@
+pub mod audit;
 pub mod cli;
 pub mod cli_error;
 pub mod config;
 pub mod dual_store;
 pub mod encryption;
-pub mod audit;
 pub mod folder_sync;
 pub mod gaze_engine;
 pub mod index_projection;
@@ -31,7 +31,9 @@ pub use rehydration::{
     RehydrationAuditRecord, RehydrationError, get_vault_passphrase, log_audit, run_export_recovery,
     run_rehydrate,
 };
-pub use search::{SearchEngine, SearchFilter, SearchParams, SearchResult, TenantSearchEngineManager};
+pub use search::{
+    SearchEngine, SearchFilter, SearchParams, SearchResult, TenantSearchEngineManager,
+};
 
 /// Crate version, for diagnostics.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

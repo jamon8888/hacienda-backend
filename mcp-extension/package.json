@@ -1,0 +1,56 @@
+{
+  "name": "hacienda-backend",
+  "version": "0.1.0",
+  "description": "Hacienda Backend MCP Extension for Claude Desktop",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "prepare": "npm run build"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.0.0"
+  },
+  "mcp": {
+    "name": "hacienda-backend",
+    "version": "0.1.0",
+    "description": "Code navigation, document retrieval, git intelligence, memory, and agent coordination over MCP",
+    "capabilities": [
+      "code-navigation",
+      "document-retrieval",
+      "git-intelligence",
+      "memory",
+      "agent-coordination",
+      "graphrag"
+    ],
+    "tools": [
+      "code",
+      "graph",
+      "git",
+      "memory",
+      "admin",
+      "web",
+      "agents",
+      "workspace",
+      "shell",
+      "vault",
+      "redact_text",
+      "graph_entities",
+      "graph_rag"
+    ],
+    "resources": [
+      "basemind://status",
+      "basemind://repo/map",
+      "basemind://outline/{path}",
+      "basemind://memory/{key}"
+    ]
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "license": "MIT"
+}

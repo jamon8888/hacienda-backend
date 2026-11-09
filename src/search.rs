@@ -365,7 +365,7 @@ impl TenantSearchEngineManager {
     /// Create a new tenant search engine manager.
     pub async fn new(config: HaciendaConfig) -> Result<Self, CliError> {
         let mut engines = std::collections::HashMap::new();
-        
+
         if config.is_multi_tenant() {
             // Multi-tenant mode: create engine for each active tenant
             for tenant in config.active_tenants() {
@@ -431,7 +431,10 @@ pub struct SearchEngine {
 
 impl SearchEngine {
     /// Create a new search engine for a specific tenant.
-    pub async fn new_for_tenant(config: &HaciendaConfig, tenant_id: &str) -> Result<Self, CliError> {
+    pub async fn new_for_tenant(
+        config: &HaciendaConfig,
+        tenant_id: &str,
+    ) -> Result<Self, CliError> {
         // Build Tantivy schema for BM25.
         // doc_id and connector are STRING (exact-match) fields so a
         // re-index can delete the previous entry via TermQuery.
@@ -455,7 +458,7 @@ impl SearchEngine {
 
         #[cfg(feature = "basemind")]
         let lance_store = {
-            let lance_dir = config.lance_dir(Some(config.default_tenant_id()));
+            let lance_dir = config.lance_dir(Some(tenant_id));
             let dim = config.embedding_dim();
             let embedding_model = config.embedding_model().to_string();
             basemind::lance::LanceStore::open(&lance_dir, dim, &embedding_model)
@@ -498,6 +501,54 @@ impl SearchEngine {
         &self.tenant_id
     }
 
+    /// Cloned handle to the Lance store, for `spawn_blocking` graph/cypher work.
+    ///
+    /// The graphrag calls block_on the store's own reactor, so they must never run
+    /// inside the async runtime; handlers clone the store and move it into a
+    /// blocking task instead.
+    #[cfg(feature = "basemind")]
+    pub fn lance_store_clone(&self) -> basemind::lance::LanceStore {
+        self.lance_store.clone()
+    }
+
+    /// Cloned shared embedder handle, if `documents.embed` is enabled.
+    #[cfg(feature = "basemind")]
+    pub fn embedder_clone(&self) -> Option<basemind::embeddings::SharedEmbedder> {
+        self.embedder.clone()
+    }
+
+    /// Read-only Cypher query over this tenant's entity graph (basemind graphrag).
+    ///
+    /// Blocking call (the store owns the reactor): invoke from `spawn_blocking`
+    /// on the async path. Gated by the `basemind` feature, which pulls the
+    /// graphrag feature transitively.
+    #[cfg(feature = "basemind")]
+    pub fn graph_cypher(
+        &self,
+        cypher: &str,
+        max_rows: usize,
+    ) -> Result<basemind::lance::CypherResult, CliError> {
+        self.lance_store
+            .execute_cypher(&self.tenant_id, cypher, max_rows)
+            .map_err(|e| CliError::Other(format!("cypher: {e}")))
+    }
+
+    /// GraphRAG hybrid retrieval for this tenant: vector lane + graph expansion + fusion.
+    ///
+    /// `query_vec` comes from the shared embedder (requires `documents.embed`).
+    /// Blocking call: invoke from `spawn_blocking` on the async path.
+    #[cfg(feature = "basemind")]
+    pub fn graph_rag(
+        &self,
+        query_vec: Vec<f32>,
+        hops: u8,
+        max_results: usize,
+    ) -> Result<(Vec<basemind::lance::GraphRagHit>, bool), CliError> {
+        self.lance_store
+            .graph_rag_search(&self.tenant_id, query_vec, hops, max_results)
+            .map_err(|e| CliError::Other(format!("graph rag: {e}")))
+    }
+
     /// Index a document (called by folder_sync after extraction).
     pub async fn index_document(
         &self,
@@ -521,13 +572,16 @@ impl SearchEngine {
         // a duplicate (doc_id is a STRING field, so the term is exact).
         index_writer.delete_term(tantivy::Term::from_field_text(self.doc_id_field, doc_id));
         let mut doc = tantivy::TantivyDocument::default();
-            doc.add_text(self.text_field, &projected_str);
-            doc.add_text(self.doc_id_field, doc_id);
-            doc.add_text(self.connector_field, connector);
-            doc.add_text(self.tier_field, &format!("{:?}", tier));
-            doc.add_date(self.indexed_at_field, tantivy::DateTime::from_timestamp_secs(chrono::Utc::now().timestamp()));
-            doc.add_text(self.tenant_id_field, &self.tenant_id);
-            index_writer.add_document(doc)?;
+        doc.add_text(self.text_field, &projected_str);
+        doc.add_text(self.doc_id_field, doc_id);
+        doc.add_text(self.connector_field, connector);
+        doc.add_text(self.tier_field, format!("{:?}", tier));
+        doc.add_date(
+            self.indexed_at_field,
+            tantivy::DateTime::from_timestamp_secs(chrono::Utc::now().timestamp()),
+        );
+        doc.add_text(self.tenant_id_field, &self.tenant_id);
+        index_writer.add_document(doc)?;
         index_writer.commit()?;
 
         // Index in basemind's LanceStore (vector + FTS) - OPTIONAL, behind feature
@@ -889,7 +943,7 @@ impl SearchEngine {
                     doc_id: hit.chunk_id,
                     snippet: snippet.clone(),
                     score: hit.score,
-                    tier: tier.clone(),
+                    tier: *tier,
                     connector: connector.clone(),
                     matched_lanes,
                 });
@@ -1023,7 +1077,7 @@ impl SearchEngine {
             // Combine results with new scores (predict validated the count).
             let mut reranked: Vec<SearchResult> = results
                 .into_iter()
-                .zip(scores.into_iter())
+                .zip(scores)
                 .map(|(mut r, score)| {
                     r.score = score;
                     r
@@ -1061,12 +1115,6 @@ impl SearchEngine {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::config::{
-        DocumentsConfig, EmbeddingsConfig, HaciendaConfig, NerConfig, RedactionConfig,
-        RerankerConfig,
-    };
-
     #[tokio::test]
     #[ignore] // TODO: update to use TenantSearchEngineManager and new config fields
     async fn test_search_engine_bm25_only() {

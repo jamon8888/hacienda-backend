@@ -11,6 +11,9 @@ use thiserror::Error;
 /// Encryption configuration for at-rest encryption.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct EncryptionConfig {
+    /// Operating assurance mode. Production always requires Keychain custody.
+    #[serde(default)]
+    pub assurance_mode: AssuranceMode,
     /// Enable encryption at rest for LanceDB and Tantivy.
     #[serde(default)]
     pub enabled: bool,
@@ -23,6 +26,21 @@ pub struct EncryptionConfig {
     /// Key rotation interval in days (0 = disabled).
     #[serde(default)]
     pub key_rotation_days: u32,
+}
+
+/// Controls whether development-only key fixtures are permitted.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum AssuranceMode {
+    #[default]
+    Production,
+    Development,
+}
+
+impl AssuranceMode {
+    pub fn is_production(self) -> bool {
+        matches!(self, Self::Production)
+    }
 }
 
 fn default_encryption_algorithm() -> String {
@@ -735,10 +753,10 @@ impl HaciendaConfig {
     /// Get the LanceDB directory path for a specific tenant.
     pub fn lance_dir(&self, tenant_id: Option<&str>) -> std::path::PathBuf {
         let tid = tenant_id.unwrap_or(&self.default_tenant);
-        if let Some(tenant) = self.get_tenant(tid) {
-            if let Some(ref custom) = tenant.lance_dir {
-                return shellexpand::tilde(custom).into_owned().into();
-            }
+        if let Some(tenant) = self.get_tenant(tid)
+            && let Some(ref custom) = tenant.lance_dir
+        {
+            return shellexpand::tilde(custom).into_owned().into();
         }
         let base = shellexpand::tilde("~/.local/share/hacienda/lance").into_owned();
         std::path::PathBuf::from(base).join(tid)
@@ -747,10 +765,10 @@ impl HaciendaConfig {
     /// Get the Tantivy index directory for a specific tenant.
     pub fn tantivy_dir(&self, tenant_id: Option<&str>) -> std::path::PathBuf {
         let tid = tenant_id.unwrap_or(&self.default_tenant);
-        if let Some(tenant) = self.get_tenant(tid) {
-            if let Some(ref custom) = tenant.tantivy_dir {
-                return shellexpand::tilde(custom).into_owned().into();
-            }
+        if let Some(tenant) = self.get_tenant(tid)
+            && let Some(ref custom) = tenant.tantivy_dir
+        {
+            return shellexpand::tilde(custom).into_owned().into();
         }
         let base = shellexpand::tilde("~/.local/share/hacienda/tantivy").into_owned();
         std::path::PathBuf::from(base).join(tid)
@@ -759,10 +777,10 @@ impl HaciendaConfig {
     /// Get the vault directory for a specific tenant.
     pub fn vault_dir(&self, tenant_id: Option<&str>) -> std::path::PathBuf {
         let tid = tenant_id.unwrap_or(&self.default_tenant);
-        if let Some(tenant) = self.get_tenant(tid) {
-            if let Some(ref custom) = tenant.vault_dir {
-                return shellexpand::tilde(custom).into_owned().into();
-            }
+        if let Some(tenant) = self.get_tenant(tid)
+            && let Some(ref custom) = tenant.vault_dir
+        {
+            return shellexpand::tilde(custom).into_owned().into();
         }
         let base = shellexpand::tilde("~/.local/share/hacienda/vault").into_owned();
         std::path::PathBuf::from(base).join(tid)
@@ -771,10 +789,10 @@ impl HaciendaConfig {
     /// Get the encryption configuration for a specific tenant.
     pub fn encryption_config(&self, tenant_id: Option<&str>) -> &EncryptionConfig {
         let tid = tenant_id.unwrap_or(&self.default_tenant);
-        if let Some(tenant) = self.get_tenant(tid) {
-            if let Some(ref enc) = tenant.encryption {
-                return enc;
-            }
+        if let Some(tenant) = self.get_tenant(tid)
+            && let Some(ref enc) = tenant.encryption
+        {
+            return enc;
         }
         &self.encryption
     }
@@ -782,10 +800,10 @@ impl HaciendaConfig {
     /// Get the KMS configuration for a specific tenant.
     pub fn kms_config(&self, tenant_id: Option<&str>) -> Option<&KmsConfig> {
         let tid = tenant_id.unwrap_or(&self.default_tenant);
-        if let Some(tenant) = self.get_tenant(tid) {
-            if let Some(ref kms) = tenant.kms {
-                return Some(kms);
-            }
+        if let Some(tenant) = self.get_tenant(tid)
+            && let Some(ref kms) = tenant.kms
+        {
+            return Some(kms);
         }
         self.kms.as_ref()
     }

@@ -25,7 +25,6 @@ impl DefaultResolver {
                 name: "Owner".to_string(),
                 capabilities: vec![
                     crate::mcp_types::Capability::Search,
-                    crate::mcp_types::Capability::Rehydrate,
                     crate::mcp_types::Capability::Sync,
                     crate::mcp_types::Capability::Status,
                 ],
@@ -44,16 +43,7 @@ impl DefaultResolver {
 
         Self {
             principals,
-            default_principal: Some(Principal {
-                id: "owner".to_string(),
-                name: "Owner".to_string(),
-                capabilities: vec![
-                    crate::mcp_types::Capability::Search,
-                    crate::mcp_types::Capability::Rehydrate,
-                    crate::mcp_types::Capability::Sync,
-                    crate::mcp_types::Capability::Status,
-                ],
-            }),
+            default_principal: None,
         }
     }
 
@@ -80,7 +70,6 @@ impl PrincipalResolver for DefaultResolver {
         let default = self.default_principal.clone();
 
         async move {
-            // For stdio, return default principal
             if ctx.transport == "stdio" {
                 return default.ok_or(ResolverError::AuthRequired);
             }
@@ -95,10 +84,6 @@ impl PrincipalResolver for DefaultResolver {
 
             Err(ResolverError::AuthRequired)
         }
-    }
-
-    fn default_principal(&self) -> Option<Principal> {
-        self.default_principal.clone()
     }
 }
 

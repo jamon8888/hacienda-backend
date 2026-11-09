@@ -55,9 +55,13 @@ pub struct RehydrateArgs {
     #[arg(long, short = 'o')]
     pub output: Option<PathBuf>,
 
-    /// Skip interactive confirmation (for scripting).
+    /// Request confirmation bypass; accepted only from an interactive terminal.
     #[arg(long, short = 'y')]
     pub yes: bool,
+
+    /// Path to the original document used to verify the vault binding.
+    #[arg(long)]
+    pub document: Option<PathBuf>,
 }
 
 /// Arguments for the doctor command.
@@ -86,10 +90,6 @@ pub struct ExportRecoveryArgs {
     /// Path to the gaze manifest file.
     #[arg(long, short = 'm', required = true)]
     pub manifest: PathBuf,
-
-    /// Recovery passphrase (generated if omitted).
-    #[arg(long, short = 'p')]
-    pub passphrase: Option<String>,
 }
 
 /// Arguments for the sync command.
