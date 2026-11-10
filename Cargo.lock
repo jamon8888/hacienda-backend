@@ -17092,8 +17092,6 @@ dependencies = [
 [[package]]
 name = "xberg"
 version = "1.3.10"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f9859ca06d9ee171c65c91cfbb0a25287a45622e7628f1b45ba5353b473b6f0d"
 dependencies = [
  "aes-gcm 0.11.1",
  "ahash",

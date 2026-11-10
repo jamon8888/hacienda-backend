@@ -9,7 +9,8 @@ publish = true
 [features]
 default = ["bm25"]
 bm25 = []
-# Vector search via basemind's LanceStore (patched xberg 1.3.10 in /Users/macbook/xberg-patched)
+# Vector search via basemind's LanceStore. xberg is resolved from its published revision;
+# no developer-local Cargo patch is part of the supported dependency graph.
 basemind = ["dep:basemind", "dep:lancedb", "dep:arrow", "xberg/embeddings"]
 vector = ["basemind"]
 xberg-formats = ["xberg/formats"]
@@ -60,7 +61,7 @@ xberg = { version = "=1.3.10", default-features = false, features = ["tokio-runt
 tantivy = { version = "0.22.0", features = ["default"] }
 
 # Optional basemind integration (Epic 14) – vector + lexical search via basemind's LanceStore + FTS.
-# Pinned to the released 0.35.0 commit; requires xberg 1.3.10 (see .cargo/config.toml note).
+# Pinned to the released 0.35.0 commit; requires the published xberg 1.3.10 contract.
 basemind = { git = "https://github.com/jamon8888/basemind", rev = "dff67c5631b0d8e472dec3d0cc9722b7b1a4a1d9", features = ["documents", "memory", "code-search", "comms", "graphrag"], optional = true }
 lancedb = { version = "0.40", optional = true }
 arrow = { version = "54", optional = true }
@@ -81,8 +82,8 @@ tokio = { version = "1.54.1", features = ["macros", "rt-multi-thread"] }
 zip = "9.0.2"
 xberg = { version = "=1.3.10", default-features = false, features = ["tokio-runtime", "simd-utf8", "redaction", "redaction-rehydrate"] }
 
-# NOTE: no [patch.crates-io] section here on purpose — machine-local overrides live
-# in an untracked .cargo/config.toml (see that file) so this manifest stays portable.
+# No [patch.crates-io] override is supported. Clean checkouts and CI must resolve the
+# published dependency graph without a developer-local absolute path.
 
 [profile.ci]
 inherits = "dev"

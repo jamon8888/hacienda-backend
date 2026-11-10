@@ -5,6 +5,7 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_call:
 
 env:
   CARGO_TERM_COLOR: always
@@ -21,35 +22,67 @@ jobs:
       - name: Format check
         run: cargo fmt --all --check
 
-  clippy:
-    name: Clippy (${{ matrix.os }})
+  verify:
+    name: Verify (${{ matrix.name }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        include:
+          - name: default-linux
+            os: ubuntu-latest
+            features: ''
+          - name: default-macos
+            os: macos-latest
+            features: ''
+          - name: basemind-linux
+            os: ubuntu-latest
+            features: basemind
+          - name: basemind-macos
+            os: macos-latest
+            features: basemind
+          - name: rerank-linux
+            os: ubuntu-latest
+            features: rerank
+          - name: rerank-macos
+            os: macos-latest
+            features: rerank-macos
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
+      - name: Install macOS ONNX Runtime
+        if: matrix.features == 'rerank-macos'
+        run: brew install onnxruntime
+      - name: Check
+        env:
+          CARGO_FEATURES: ${{ matrix.features }}
+        run: |
+          if [ -n "$CARGO_FEATURES" ]; then
+            cargo check --all-targets --features "$CARGO_FEATURES"
+          else
+            cargo check --all-targets
+          fi
       - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings
-
-  test:
-    name: Test (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+        env:
+          CARGO_FEATURES: ${{ matrix.features }}
+        run: |
+          if [ -n "$CARGO_FEATURES" ]; then
+            cargo clippy --all-targets --features "$CARGO_FEATURES" -- -D warnings
+          else
+            cargo clippy --all-targets -- -D warnings
+          fi
       - name: Test
-        run: cargo test --all
+        env:
+          CARGO_FEATURES: ${{ matrix.features }}
+        run: |
+          if [ -n "$CARGO_FEATURES" ]; then
+            cargo test --all --features "$CARGO_FEATURES"
+          else
+            cargo test --all
+          fi
 
   test-doc:
     name: Doc Tests
