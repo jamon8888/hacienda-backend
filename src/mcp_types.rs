@@ -4,6 +4,7 @@
 //! to provide per-agent authentication/authorization.
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::future::Future;
 
 /// Principal identity resolved from an MCP connection.
@@ -15,6 +16,9 @@ pub struct Principal {
     pub name: String,
     /// Capabilities granted to this principal.
     pub capabilities: Vec<Capability>,
+    /// Tenants this authenticated principal is bound to; payload IDs never expand this set.
+    #[serde(default)]
+    pub tenant_ids: HashSet<String>,
 }
 
 /// Capabilities that can be granted to a principal.
@@ -29,6 +33,8 @@ pub enum Capability {
     Status,
     /// Can call graph tools: read-only Cypher over the entity graph and GraphRAG retrieval.
     GraphRag,
+    /// Can attach an already-processed document reference.
+    AttachLocalDoc,
 }
 
 /// Resolves an MCP connection to a Principal.

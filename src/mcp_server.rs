@@ -20,6 +20,7 @@ use rmcp::{
 };
 use serde::Serialize;
 use serde_json::Value;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::io;
@@ -29,6 +30,7 @@ use tracing::{info, warn};
 use crate::{
     EngineEraFingerprint,
     audit::AuditLog,
+    authz::{AuthzError, FolderRoot, attach_local_doc},
     mcp_types::{Capability, Principal, PrincipalResolver, ResolutionContext},
     search::{SearchFilter, SearchParams, TenantSearchEngineManager},
 };
@@ -90,6 +92,10 @@ pub struct ServerState {
     pub config_path: Option<PathBuf>,
     /// Audit log for WORM audit trail.
     pub audit_log: Option<Arc<AuditLog>>,
+    pub folder_roots: HashMap<String, Vec<FolderRoot>>,
+    /// Tenant-scoped and sync-wired; empty means attach fails closed. Durable
+    /// cross-restart persistence is tracked by #21 (ingestion pipeline).
+    pub processed_index: Arc<RwLock<HashMap<String, HashMap<PathBuf, String>>>>,
 }
 
 /// MCP server handler.
@@ -112,6 +118,9 @@ where
         registry.register(search_tool_schema(), Capability::Search);
         registry.register(sync_tool_schema(), Capability::Sync);
         registry.register(status_tool_schema(), Capability::Status);
+        registry.register(attach_local_doc_tool_schema(), Capability::AttachLocalDoc);
+        // TODO(#29/#23): disclosure tools remain intentionally disabled until their
+        // authenticated owner-side contracts are implemented.
         registry.register(graph_entities_tool_schema(), Capability::GraphRag);
         registry.register(graph_rag_tool_schema(), Capability::GraphRag);
 
@@ -123,6 +132,8 @@ where
                 search_engine: None,
                 config_path: None,
                 audit_log: None,
+                folder_roots: HashMap::new(),
+                processed_index: Arc::new(RwLock::new(HashMap::new())),
             },
         }
     }
@@ -136,6 +147,26 @@ where
     /// Attach hacienda.toml config path for sync operations.
     pub fn with_config_path(mut self, config_path: PathBuf) -> Self {
         self.state.config_path = Some(config_path);
+        self
+    }
+
+    pub fn with_folder_roots(mut self, roots: HashMap<String, Vec<FolderRoot>>) -> Self {
+        self.state.folder_roots = roots;
+        self
+    }
+    pub async fn with_processed_document(
+        self,
+        tenant: String,
+        path: PathBuf,
+        token: String,
+    ) -> Self {
+        self.state
+            .processed_index
+            .write()
+            .await
+            .entry(tenant)
+            .or_default()
+            .insert(path, token);
         self
     }
 
@@ -216,8 +247,46 @@ where
             .await
             .map_err(|_| ErrorData::invalid_request("authentication required", None))?;
 
-        // Capability check (registry already filters, but double-check here)
+        // Capability check (registry already filters, but double-check here).
+        // Tenant IDs in payloads are selectors only; authorization comes solely
+        // from the authenticated principal binding and fails closed.
         let has_cap = |cap: Capability| principal.capabilities.contains(&cap);
+        if let Some(args) = request.arguments.as_ref()
+            && let Some(tenant) = args.get("tenant_id").and_then(|v| v.as_str())
+            && !principal.tenant_ids.contains(tenant)
+        {
+            if request.name == "attach_local_doc" {
+                audit_authz(
+                    &self.state,
+                    &principal,
+                    Some(tenant),
+                    "deny",
+                    "tenant_unauthorized",
+                    "ERROR_CODE",
+                )
+                .await
+                .map_err(|_| ErrorData::internal_error("audit unavailable", None))?;
+                return Err(ErrorData::invalid_params("document unavailable", None));
+            }
+            return Err(ErrorData::invalid_params("tenant unauthorized", None));
+        }
+        if request.name == "attach_local_doc" && !has_cap(Capability::AttachLocalDoc) {
+            audit_authz(
+                &self.state,
+                &principal,
+                request
+                    .arguments
+                    .as_ref()
+                    .and_then(|a| a.get("tenant_id"))
+                    .and_then(|v| v.as_str()),
+                "deny",
+                "missing_capability",
+                "ERROR_CODE",
+            )
+            .await
+            .map_err(|_| ErrorData::internal_error("audit unavailable", None))?;
+            return Err(ErrorData::invalid_params("document unavailable", None));
+        }
 
         let result = match request.name.as_ref() {
             "search" => {
@@ -242,15 +311,34 @@ where
                         principal_id: principal.id.clone(),
                         tool: "search".to_string(),
                         arguments: serde_json::json!({ "argument_count": args.as_ref().map_or(0, |a| a.len()) }),
+                        authz: crate::audit::AuthorizationMetadata {
+                            principal_fingerprint: format!(
+                                "blake3:{}",
+                                blake3::hash(principal.id.as_bytes()).to_hex()
+                            ),
+                            tenant_id: args
+                                .as_ref()
+                                .and_then(|a| a.get("tenant_id"))
+                                .and_then(|v| v.as_str())
+                                .map(str::to_owned),
+                            tool: request.name.to_string(),
+                            decision: "allow".into(),
+                            reason_class: "authorized".into(),
+                        },
                         result_summary,
                         signature: String::new(),
                         public_key: String::new(),
                     };
-                    let _ = audit_log.append(record).await;
+                    if audit_log.append_required(record).await.is_err() {
+                        return Err(ErrorData::internal_error("audit unavailable", None));
+                    }
                 }
                 result?
             }
             "sync" => {
+                if self.state.audit_log.is_none() {
+                    return Err(ErrorData::internal_error("audit unavailable", None));
+                }
                 if !has_cap(Capability::Sync) {
                     return Err(ErrorData::invalid_params(
                         "principal lacks Sync capability",
@@ -259,7 +347,7 @@ where
                 }
                 let args = request.arguments.clone();
                 let start = std::time::Instant::now();
-                let result = handle_sync(&self.state, args.clone()).await;
+                let result = handle_sync(&self.state, args.clone(), &principal).await;
                 let duration = start.elapsed();
                 let (result_summary, _success) = match &result {
                     Ok(_) => (format!("OK ({}ms)", duration.as_millis()), true),
@@ -272,11 +360,27 @@ where
                         principal_id: principal.id.clone(),
                         tool: "sync".to_string(),
                         arguments: serde_json::json!({ "argument_count": args.as_ref().map_or(0, |a| a.len()) }),
+                        authz: crate::audit::AuthorizationMetadata {
+                            principal_fingerprint: format!(
+                                "blake3:{}",
+                                blake3::hash(principal.id.as_bytes()).to_hex()
+                            ),
+                            tenant_id: args
+                                .as_ref()
+                                .and_then(|a| a.get("tenant_id"))
+                                .and_then(|v| v.as_str())
+                                .map(str::to_owned),
+                            tool: request.name.to_string(),
+                            decision: "allow".into(),
+                            reason_class: "authorized".into(),
+                        },
                         result_summary,
                         signature: String::new(),
                         public_key: String::new(),
                     };
-                    let _ = audit_log.append(record).await;
+                    if audit_log.append_required(record).await.is_err() {
+                        return Err(ErrorData::internal_error("audit unavailable", None));
+                    }
                 }
                 result?
             }
@@ -302,13 +406,160 @@ where
                         principal_id: principal.id.clone(),
                         tool: "status".to_string(),
                         arguments: serde_json::json!({ "argument_count": args.as_ref().map_or(0, |a| a.len()) }),
+                        authz: crate::audit::AuthorizationMetadata {
+                            principal_fingerprint: format!(
+                                "blake3:{}",
+                                blake3::hash(principal.id.as_bytes()).to_hex()
+                            ),
+                            tenant_id: args
+                                .as_ref()
+                                .and_then(|a| a.get("tenant_id"))
+                                .and_then(|v| v.as_str())
+                                .map(str::to_owned),
+                            tool: request.name.to_string(),
+                            decision: "allow".into(),
+                            reason_class: "authorized".into(),
+                        },
                         result_summary,
                         signature: String::new(),
                         public_key: String::new(),
                     };
-                    let _ = audit_log.append(record).await;
+                    if audit_log.append_required(record).await.is_err() {
+                        return Err(ErrorData::internal_error("audit unavailable", None));
+                    }
                 }
                 result?
+            }
+            "attach_local_doc" => {
+                if self.state.audit_log.is_none() {
+                    return Err(ErrorData::internal_error("audit unavailable", None));
+                }
+                let tenant_from_args = request
+                    .arguments
+                    .as_ref()
+                    .and_then(|a| a.get("tenant_id"))
+                    .and_then(|v| v.as_str());
+                if !has_cap(Capability::AttachLocalDoc) {
+                    audit_authz(
+                        &self.state,
+                        &principal,
+                        tenant_from_args,
+                        "deny",
+                        "missing_capability",
+                        "ERROR_CODE",
+                    )
+                    .await
+                    .map_err(|_| ErrorData::internal_error("audit unavailable", None))?;
+                    return Err(ErrorData::invalid_params("document unavailable", None));
+                }
+                let args = match request.arguments.clone() {
+                    Some(args) => args,
+                    None => {
+                        audit_authz(
+                            &self.state,
+                            &principal,
+                            None,
+                            "deny",
+                            "invalid_reference",
+                            "ERROR_CODE",
+                        )
+                        .await
+                        .map_err(|_| ErrorData::internal_error("audit unavailable", None))?;
+                        return Err(ErrorData::invalid_params("document unavailable", None));
+                    }
+                };
+                let tenant = match args.get("tenant_id").and_then(|v| v.as_str()) {
+                    Some(t) if principal.tenant_ids.contains(t) => t,
+                    Some(t) => {
+                        audit_authz(
+                            &self.state,
+                            &principal,
+                            Some(t),
+                            "deny",
+                            "tenant_unauthorized",
+                            "ERROR_CODE",
+                        )
+                        .await
+                        .map_err(|_| ErrorData::internal_error("audit unavailable", None))?;
+                        return Err(ErrorData::invalid_params("document unavailable", None));
+                    }
+                    None => {
+                        audit_authz(
+                            &self.state,
+                            &principal,
+                            None,
+                            "deny",
+                            "invalid_reference",
+                            "ERROR_CODE",
+                        )
+                        .await
+                        .map_err(|_| ErrorData::internal_error("audit unavailable", None))?;
+                        return Err(ErrorData::invalid_params("document unavailable", None));
+                    }
+                };
+                let path = match args.get("path").and_then(|v| v.as_str()) {
+                    Some(path) => path,
+                    None => {
+                        audit_authz(
+                            &self.state,
+                            &principal,
+                            Some(tenant),
+                            "deny",
+                            "invalid_reference",
+                            "ERROR_CODE",
+                        )
+                        .await
+                        .map_err(|_| ErrorData::internal_error("audit unavailable", None))?;
+                        return Err(ErrorData::invalid_params("document unavailable", None));
+                    }
+                };
+                let processed = self.state.processed_index.read().await;
+                let roots = match self.state.folder_roots.get(tenant) {
+                    Some(roots) => roots,
+                    None => {
+                        audit_authz(
+                            &self.state,
+                            &principal,
+                            Some(tenant),
+                            "deny",
+                            "outside_root",
+                            "ERROR_CODE",
+                        )
+                        .await
+                        .map_err(|_| ErrorData::internal_error("audit unavailable", None))?;
+                        return Err(ErrorData::invalid_params("document unavailable", None));
+                    }
+                };
+                let entries = processed.get(tenant).cloned().unwrap_or_default();
+                let clean = match attach_local_doc(PathBuf::from(path).as_path(), roots, &entries) {
+                    Ok(clean) => clean,
+                    Err(error) => {
+                        audit_authz(
+                            &self.state,
+                            &principal,
+                            Some(tenant),
+                            "deny",
+                            authz_reason(&error),
+                            "ERROR_CODE",
+                        )
+                        .await
+                        .map_err(|_| ErrorData::internal_error("audit unavailable", None))?;
+                        return Err(ErrorData::invalid_params("document unavailable", None));
+                    }
+                };
+                audit_authz(
+                    &self.state,
+                    &principal,
+                    Some(tenant),
+                    "allow",
+                    "authorized",
+                    "clean-ref",
+                )
+                .await
+                .map_err(|_| ErrorData::internal_error("audit unavailable", None))?;
+                CallToolResult::success(vec![ContentBlock::text(
+                    serde_json::json!({"reference": clean.token}).to_string(),
+                )])
             }
             "graph_entities" => {
                 if !has_cap(Capability::GraphRag) {
@@ -332,11 +583,27 @@ where
                         principal_id: principal.id.clone(),
                         tool: "graph_entities".to_string(),
                         arguments: serde_json::json!({ "argument_count": args.as_ref().map_or(0, |a| a.len()) }),
+                        authz: crate::audit::AuthorizationMetadata {
+                            principal_fingerprint: format!(
+                                "blake3:{}",
+                                blake3::hash(principal.id.as_bytes()).to_hex()
+                            ),
+                            tenant_id: args
+                                .as_ref()
+                                .and_then(|a| a.get("tenant_id"))
+                                .and_then(|v| v.as_str())
+                                .map(str::to_owned),
+                            tool: request.name.to_string(),
+                            decision: "allow".into(),
+                            reason_class: "authorized".into(),
+                        },
                         result_summary,
                         signature: String::new(),
                         public_key: String::new(),
                     };
-                    let _ = audit_log.append(record).await;
+                    if audit_log.append_required(record).await.is_err() {
+                        return Err(ErrorData::internal_error("audit unavailable", None));
+                    }
                 }
                 result?
             }
@@ -362,11 +629,27 @@ where
                         principal_id: principal.id.clone(),
                         tool: "graph_rag".to_string(),
                         arguments: serde_json::json!({ "argument_count": args.as_ref().map_or(0, |a| a.len()) }),
+                        authz: crate::audit::AuthorizationMetadata {
+                            principal_fingerprint: format!(
+                                "blake3:{}",
+                                blake3::hash(principal.id.as_bytes()).to_hex()
+                            ),
+                            tenant_id: args
+                                .as_ref()
+                                .and_then(|a| a.get("tenant_id"))
+                                .and_then(|v| v.as_str())
+                                .map(str::to_owned),
+                            tool: request.name.to_string(),
+                            decision: "allow".into(),
+                            reason_class: "authorized".into(),
+                        },
                         result_summary,
                         signature: String::new(),
                         public_key: String::new(),
                     };
-                    let _ = audit_log.append(record).await;
+                    if audit_log.append_required(record).await.is_err() {
+                        return Err(ErrorData::internal_error("audit unavailable", None));
+                    }
                 }
                 result?
             }
@@ -374,6 +657,52 @@ where
         };
 
         Ok(result.into())
+    }
+}
+
+async fn audit_authz(
+    state: &ServerState,
+    principal: &Principal,
+    tenant_id: Option<&str>,
+    decision: &str,
+    reason_class: &str,
+    result_summary: &str,
+) -> anyhow::Result<()> {
+    let log = state
+        .audit_log
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("audit unavailable"))?;
+    log.append_required(crate::audit::AuditRecord {
+        sequence: 0,
+        timestamp: String::new(),
+        principal_id: principal.id.clone(),
+        tool: "attach_local_doc".into(),
+        arguments: serde_json::json!({"argument_count": 2}),
+        authz: crate::audit::AuthorizationMetadata {
+            principal_fingerprint: format!(
+                "blake3:{}",
+                blake3::hash(principal.id.as_bytes()).to_hex()
+            ),
+            tenant_id: tenant_id.map(str::to_owned),
+            tool: "attach_local_doc".into(),
+            decision: decision.into(),
+            reason_class: reason_class.into(),
+        },
+        result_summary: result_summary.into(),
+        signature: String::new(),
+        public_key: String::new(),
+    })
+    .await?;
+    Ok(())
+}
+
+fn authz_reason(error: &AuthzError) -> &'static str {
+    match error {
+        AuthzError::UnsupportedScheme => "unsupported_scheme",
+        AuthzError::OutsideRoot | AuthzError::RootUnavailable => "outside_root",
+        AuthzError::Unprocessed => "unprocessed",
+        AuthzError::InvalidReference => "invalid_reference",
+        AuthzError::UnauthorizedTenant => "tenant_unauthorized",
     }
 }
 
@@ -418,7 +747,26 @@ async fn handle_search(
 async fn handle_sync(
     state: &ServerState,
     args: Option<serde_json::Map<String, Value>>,
+    principal: &Principal,
 ) -> Result<CallToolResult, McpError> {
+    let tenant = match args
+        .as_ref()
+        .and_then(|a| a.get("tenant_id"))
+        .and_then(|v| v.as_str())
+        .map(str::to_owned)
+    {
+        Some(t) if principal.tenant_ids.contains(&t) => t,
+        Some(_) => return Err(ErrorData::invalid_params("tenant unauthorized", None)),
+        None if principal.tenant_ids.len() == 1 => {
+            principal.tenant_ids.iter().next().cloned().unwrap()
+        }
+        _ => return Err(ErrorData::invalid_params("tenant_id required", None)),
+    };
+    let roots = state
+        .folder_roots
+        .get(&tenant)
+        .ok_or_else(|| ErrorData::invalid_params("tenant unavailable", None))?;
+    let root_paths: Vec<PathBuf> = roots.iter().map(|r| r.path.clone()).collect();
     let config_path = state
         .config_path
         .as_ref()
@@ -434,10 +782,38 @@ async fn handle_sync(
     // new/changed files. Status is reported on stderr inside run_manual_refresh,
     // so stdout stays clean for the stdio JSON-RPC stream; the indexed document
     // list is returned in the tool result instead.
-    let indexed = crate::folder_sync::run_manual_refresh(config_path, full)
-        .await
-        .map_err(|_| ErrorData::internal_error("sync failed", None))?;
+    let indexed =
+        crate::folder_sync::run_manual_refresh_scoped(config_path, &tenant, &root_paths, full)
+            .await
+            .map_err(|_| ErrorData::internal_error("sync failed", None))?;
 
+    let mut scoped = Vec::new();
+    let roots = state.folder_roots.get(&tenant).unwrap();
+    for doc in indexed {
+        if let Ok(canon) = std::fs::canonicalize(&doc.path)
+            && roots
+                .iter()
+                .filter_map(|r| r.canonical_for_auth().ok())
+                .any(|r| canon.starts_with(r))
+        {
+            let token = format!(
+                "clean-{}",
+                blake3::hash(
+                    format!("{}|{}|{:?}", doc.doc_id, doc.content_hash, doc.fingerprint).as_bytes()
+                )
+                .to_hex()
+            );
+            state
+                .processed_index
+                .write()
+                .await
+                .entry(tenant.clone())
+                .or_default()
+                .insert(canon, token);
+            scoped.push(doc);
+        }
+    }
+    let indexed = scoped;
     let mode = if full { "full" } else { "incremental" };
     Ok(CallToolResult::success(vec![ContentBlock::text(
         serde_json::json!({
@@ -636,6 +1012,8 @@ fn search_tool_schema() -> Tool {
 fn sync_tool_schema() -> Tool {
     #[derive(Serialize, schemars::JsonSchema)]
     struct SyncArgs {
+        /// Authorized tenant selector; omitted only for a single-bound principal.
+        tenant_id: Option<String>,
         #[serde(default)]
         full: bool,
     }
@@ -670,6 +1048,16 @@ fn status_tool_schema() -> Tool {
             .idempotent(true)
             .open_world(false),
     )
+}
+
+fn attach_local_doc_tool_schema() -> Tool {
+    #[derive(Serialize, schemars::JsonSchema)]
+    struct AttachArgs {
+        tenant_id: String,
+        path: String,
+    }
+    Tool::new("attach_local_doc", "Attach an already-processed document below an Hacienda ingestion root; returns an opaque clean reference.", schema_for_type::<AttachArgs>())
+        .with_annotations(ToolAnnotations::with_title("Attach Local Document").read_only(true).destructive(false).idempotent(true).open_world(false))
 }
 
 fn graph_entities_tool_schema() -> Tool {
@@ -830,4 +1218,67 @@ where
 
 async fn healthz() -> Json<Value> {
     Json(serde_json::json!({ "status": "ok" }))
+}
+
+#[cfg(test)]
+mod authz_manifest_tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    #[test]
+    fn closed_manifest_contains_only_current_tools() {
+        let mut registry = ToolRegistry::new();
+        registry.register(search_tool_schema(), Capability::Search);
+        registry.register(sync_tool_schema(), Capability::Sync);
+        registry.register(status_tool_schema(), Capability::Status);
+        registry.register(attach_local_doc_tool_schema(), Capability::AttachLocalDoc);
+        let principal = Principal {
+            id: "p".into(),
+            name: "p".into(),
+            capabilities: vec![
+                Capability::Search,
+                Capability::Sync,
+                Capability::Status,
+                Capability::AttachLocalDoc,
+            ],
+            tenant_ids: HashSet::from(["t".into()]),
+        };
+        let names: HashSet<_> = registry
+            .available_tools(&principal)
+            .into_iter()
+            .map(|t| t.name.to_string())
+            .collect();
+        assert!(names.contains("search"));
+        assert!(names.contains("sync"));
+        assert!(names.contains("status"));
+        assert!(names.contains("attach_local_doc"));
+        for absent in ["rehydrate", "request_human_disclosure", "disclosure_status"] {
+            assert!(!names.contains(absent));
+        }
+    }
+
+    #[test]
+    fn tenant_maps_do_not_cross_contaminate() {
+        let mut roots = HashMap::new();
+        roots.insert("a".to_string(), vec![FolderRoot::new("local", "/a")]);
+        roots.insert("b".to_string(), vec![FolderRoot::new("local", "/b")]);
+        let mut processed = HashMap::new();
+        processed.insert(
+            "a".to_string(),
+            HashMap::from([(PathBuf::from("/a/doc"), "clean-a".to_string())]),
+        );
+        assert!(
+            !roots
+                .get("b")
+                .unwrap()
+                .iter()
+                .any(|r| r.path == PathBuf::from("/a"))
+        );
+        assert!(
+            !processed
+                .get("b")
+                .map(|m| m.contains_key(PathBuf::from("/a/doc").as_path()))
+                .unwrap_or(false)
+        );
+    }
 }

@@ -1,5 +1,6 @@
 //! Rehydration logic: decrypt vault map, restore entities/documents, audit logging.
 
+use crate::authz::PrincipalBinding;
 use crate::cli::{ExportRecoveryArgs, RehydrateArgs};
 use crate::dual_store::RehydrationManifest;
 use crate::encryption::{decrypt_vault_blob, default_vault_key_provider, encrypt_vault_blob};
@@ -32,6 +33,8 @@ pub enum RehydrationError {
     UserCancelled,
     #[error("vault custody failed: {0}")]
     Custody(String),
+    #[error("principal is not authorized for tenant")]
+    UnauthorizedTenant,
 }
 
 /// Result of a rehydration operation (for audit logging).
@@ -169,7 +172,12 @@ fn write_output(content: &str, output_path: Option<&Path>) -> Result<(), Rehydra
 pub async fn run_rehydrate(
     args: RehydrateArgs,
     vault_passphrase: &str,
+    binding: &PrincipalBinding,
+    tenant_id: &str,
 ) -> Result<RehydrationAuditRecord, RehydrationError> {
+    if !binding.authorizes(tenant_id) {
+        return Err(RehydrationError::UnauthorizedTenant);
+    }
     let timestamp = chrono::Utc::now().to_rfc3339();
 
     if args.output.is_none() {
@@ -235,7 +243,12 @@ pub async fn run_rehydrate(
 pub async fn run_export_recovery(
     args: ExportRecoveryArgs,
     vault_passphrase: &str,
+    binding: &PrincipalBinding,
+    tenant_id: &str,
 ) -> Result<(), RehydrationError> {
+    if !binding.authorizes(tenant_id) {
+        return Err(RehydrationError::UnauthorizedTenant);
+    }
     let manifest_bytes = load_manifest(&args.manifest)?;
     let vault_map =
         load_vault_map_verified(&args.vault_map, &args.manifest, None, vault_passphrase)?;

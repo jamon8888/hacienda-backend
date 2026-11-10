@@ -1,7 +1,9 @@
 pub mod audit;
+pub mod authz;
 pub mod cli;
 pub mod cli_error;
 pub mod config;
+pub mod disclosure_ledger;
 pub mod dual_store;
 pub mod encryption;
 pub mod folder_sync;
@@ -14,13 +16,21 @@ pub mod redactor;
 pub mod rehydration;
 pub mod search;
 
+pub use authz::{
+    AuthzError, CleanDocumentRef, FolderRoot, PrincipalBinding, PrincipalRole, attach_local_doc,
+};
 pub use cli::{Cli, Commands, DoctorArgs, ExportRecoveryArgs, McpArgs, RehydrateArgs, SyncArgs};
 pub use cli_error::CliError;
 pub use config::{ConfigError, HaciendaConfig, RedactionConfig, doctor_checks, load_config};
+pub use disclosure_ledger::{
+    DisclosureHandle, DisclosureLedger, DisclosureRequest, DisclosureStatus,
+};
 pub use dual_store::{
     DualStoreError, DualStoreOutput, EngineEraFingerprint, TOKEN_GRAMMAR_VERSION, write_dual_store,
 };
-pub use folder_sync::{FolderSync, IndexedDocument, SyncEvent, run_manual_refresh};
+pub use folder_sync::{
+    FolderSync, IndexedDocument, SyncEvent, run_manual_refresh, run_manual_refresh_scoped,
+};
 pub use gaze_engine::{Detection, EngineError, GazeEngine};
 pub use index_projection::{ProjectionConfig, SensitivityTier, project_document, project_token};
 pub use mcp_resolver::DefaultResolver;

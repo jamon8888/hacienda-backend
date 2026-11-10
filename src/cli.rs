@@ -35,6 +35,12 @@ pub enum Commands {
 /// Arguments for the rehydrate command.
 #[derive(Args, Debug)]
 pub struct RehydrateArgs {
+    /// Hacienda configuration containing the authenticated principal binding.
+    #[arg(long, short = 'c', default_value = "basemind.toml")]
+    pub config: PathBuf,
+    /// Authorized tenant; omitted only for a single-bound principal.
+    #[arg(long)]
+    pub tenant: Option<String>,
     /// Document ID to rehydrate (required for full document rehydration).
     #[arg(long, short = 'd', conflicts_with = "entity")]
     pub doc_id: Option<String>,
@@ -79,6 +85,12 @@ pub struct DoctorArgs {
 /// Arguments for the export-recovery command.
 #[derive(Args, Debug)]
 pub struct ExportRecoveryArgs {
+    /// Hacienda configuration containing the authenticated principal binding.
+    #[arg(long, short = 'c', default_value = "basemind.toml")]
+    pub config: PathBuf,
+    /// Authorized tenant; omitted only for a single-bound principal.
+    #[arg(long)]
+    pub tenant: Option<String>,
     /// Output path for the encrypted recovery bundle.
     #[arg(long, short = 'o', required = true)]
     pub output: PathBuf,
@@ -98,6 +110,10 @@ pub struct SyncArgs {
     /// Path to basemind.toml configuration file.
     #[arg(long, short = 'c', default_value = "basemind.toml")]
     pub config: PathBuf,
+
+    /// Authorized tenant; omitted only when the principal has exactly one binding.
+    #[arg(long)]
+    pub tenant: Option<String>,
 
     /// Run in watch mode (continuous) instead of one-shot refresh.
     #[arg(long, short = 'w')]

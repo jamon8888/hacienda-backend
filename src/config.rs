@@ -3,6 +3,7 @@
 //! Parses `basemind.toml` for the engine selector and related settings.
 //! Validates on load; fails closed on unknown/missing keys.
 
+use crate::authz::{FolderRoot, PrincipalBinding};
 use serde::{Deserialize, Serialize};
 use shellexpand;
 use std::path::Path;
@@ -122,6 +123,9 @@ pub enum Device {
 pub struct TenantConfig {
     /// Unique tenant identifier (used for data isolation).
     pub tenant_id: String,
+    /// Roots Hacienda may ingest/sync; these are not agent filesystem grants.
+    #[serde(default)]
+    pub folder_roots: Vec<FolderRoot>,
     /// Human-readable tenant name.
     pub name: String,
     /// Optional: custom LanceDB directory for this tenant.
@@ -151,6 +155,9 @@ fn default_true() -> bool {
 /// Top-level hacienda-backend configuration (subset of basemind.toml we care about).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HaciendaConfig {
+    /// Explicit authenticated principal bindings. Missing bindings authorize nothing.
+    #[serde(default)]
+    pub principals: Vec<PrincipalBinding>,
     /// List of tenants (multi-tenancy). If empty, single-tenant mode is used.
     #[serde(default)]
     pub tenants: Vec<TenantConfig>,
@@ -806,6 +813,13 @@ impl HaciendaConfig {
             return Some(kms);
         }
         self.kms.as_ref()
+    }
+
+    /// Resolve an explicitly configured principal binding. No implicit owner/default fallback.
+    pub fn principal(&self, principal_id: &str) -> Option<&PrincipalBinding> {
+        self.principals
+            .iter()
+            .find(|p| p.principal_id == principal_id)
     }
 
     /// Get a tenant by ID.

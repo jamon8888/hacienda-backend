@@ -32,6 +32,35 @@ pub const MCP_AUDIT_TOOLS: &[&str] = &[
     "graph_rag",
 ];
 
+/// Failure policy for an audit append. Mutations fail closed; read-only calls
+/// are allowed to return with an explicit audit-failed marker at their caller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuditOperationClass {
+    SideEffecting,
+    ReadOnly,
+}
+
+impl AuditOperationClass {
+    pub fn for_tool(tool: &str) -> Self {
+        match tool {
+            "sync" | "attach_local_doc" | "request_human_disclosure" | "disclosure_status" => {
+                Self::SideEffecting
+            }
+            _ => Self::ReadOnly,
+        }
+    }
+}
+
+/// Metadata-only authorization result persisted with every audit record.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AuthorizationMetadata {
+    pub principal_fingerprint: String,
+    pub tenant_id: Option<String>,
+    pub tool: String,
+    pub decision: String,
+    pub reason_class: String,
+}
+
 /// Audit record for a single MCP tool call.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuditRecord {
@@ -45,6 +74,9 @@ pub struct AuditRecord {
     pub tool: String,
     /// Metadata-only argument summary; never raw arguments or values.
     pub arguments: serde_json::Value,
+    /// Structured authorization outcome; all values are metadata-only.
+    #[serde(default)]
+    pub authz: AuthorizationMetadata,
     /// Safe result status code; never an error detail.
     pub result_summary: String,
     /// Ed25519 signature of the canonical JSON of this record (excluding signature field).
@@ -58,6 +90,11 @@ fn sanitize_record(mut record: AuditRecord) -> Result<AuditRecord> {
         return Err(anyhow::anyhow!("audit tool is not allowlisted"));
     }
 
+    // Store only a stable principal fingerprint; raw identity is not audit data.
+    record.principal_id = format!(
+        "blake3:{}",
+        blake3::hash(record.principal_id.as_bytes()).to_hex()
+    );
     record.arguments = serde_json::json!({
         "argument_count": match &record.arguments {
             serde_json::Value::Object(fields) => fields.len(),
@@ -211,6 +248,29 @@ impl AuditLog {
         Ok(())
     }
 
+    /// Required append path. Callers must await this result before completing a
+    /// side-effecting operation; an unavailable/unwritable audit store fails closed.
+    pub async fn append_required(&self, record: AuditRecord) -> Result<()> {
+        self.append(record).await
+    }
+
+    /// Append according to the operation policy. Read-only callers may choose
+    /// to surface `audit_failed: true`; side-effecting callers must propagate.
+    pub async fn append_for_operation(
+        &self,
+        record: AuditRecord,
+        class: AuditOperationClass,
+    ) -> Result<bool> {
+        match self.append(record).await {
+            Ok(()) => Ok(true),
+            Err(error) if class == AuditOperationClass::ReadOnly => {
+                warn!("read-only audit append failed: {}", error);
+                Ok(false)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     /// Verify the integrity of the audit log (check signatures and sequence).
     pub async fn verify_integrity(&self) -> Result<Vec<String>> {
         let content = tokio::fs::read_to_string(&self.path)
@@ -305,19 +365,21 @@ impl AuditMiddleware {
             principal_id: principal_id.to_string(),
             tool: tool.to_string(),
             arguments,
+            authz: AuthorizationMetadata::default(),
             result_summary,
             signature: String::new(),
             public_key: String::new(),
         };
 
-        // Fire-and-forget audit (non-blocking)
-        let audit_log = self.audit_log.clone();
-        tokio::spawn(async move {
-            if let Err(e) = audit_log.append(record).await {
-                warn!("Failed to write audit record: {}", e);
-            }
-        });
-
+        // Required audit writes are awaited. Read-only writes are best effort
+        // and callers may mark the response with `audit_failed: true`.
+        let audit_ok = self
+            .audit_log
+            .append_for_operation(record, AuditOperationClass::for_tool(tool))
+            .await?;
+        if !audit_ok {
+            warn!("read-only audit record was not persisted");
+        }
         result
     }
 }
@@ -337,6 +399,7 @@ mod tests {
                 "query": "PII_QUERY_SHOULD_NOT_APPEAR",
                 "token": "PII_TOKEN_SHOULD_NOT_APPEAR",
             }),
+            authz: AuthorizationMetadata::default(),
             result_summary: "ERROR: PII_ERROR_SHOULD_NOT_APPEAR".to_string(),
             signature: String::new(),
             public_key: String::new(),
@@ -351,6 +414,32 @@ mod tests {
     }
 
     #[test]
+    fn attach_authz_audit_is_metadata_only() {
+        let record = AuditRecord {
+            sequence: 0,
+            timestamp: String::new(),
+            principal_id: "principal".into(),
+            tool: "attach_local_doc".into(),
+            arguments: serde_json::json!({"path": "/secret/raw.pdf", "token": "clean-secret"}),
+            authz: AuthorizationMetadata {
+                principal_fingerprint: "blake3:fingerprint".into(),
+                tenant_id: Some("tenant-a".into()),
+                tool: "attach_local_doc".into(),
+                decision: "deny".into(),
+                reason_class: "outside_root".into(),
+            },
+            result_summary: "ERROR_CODE".into(),
+            signature: String::new(),
+            public_key: String::new(),
+        };
+        let serialized = serde_json::to_string(&sanitize_record(record).unwrap()).unwrap();
+        assert!(!serialized.contains("/secret/raw.pdf"));
+        assert!(!serialized.contains("clean-secret"));
+        assert!(serialized.contains("tenant-a"));
+        assert!(serialized.contains("outside_root"));
+    }
+
+    #[test]
     fn audit_record_rejects_non_mcp_tools() {
         let record = AuditRecord {
             sequence: 0,
@@ -358,6 +447,7 @@ mod tests {
             principal_id: "principal".to_string(),
             tool: "rehydrate".to_string(),
             arguments: serde_json::Value::Null,
+            authz: AuthorizationMetadata::default(),
             result_summary: "OK".to_string(),
             signature: String::new(),
             public_key: String::new(),

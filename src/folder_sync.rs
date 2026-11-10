@@ -350,6 +350,31 @@ impl FolderSync {
 /// `full` selects a complete rebuild; otherwise only new/changed files are
 /// (re)indexed. Status goes to stderr and the indexed documents are returned:
 /// stdout may carry the stdio MCP JSON-RPC stream when called from the server.
+/// Scoped refresh used by authenticated MCP/CLI paths. Each supplied root is
+/// processed independently; no current-directory or all-tenant fallback exists.
+pub async fn run_manual_refresh_scoped(
+    config_path: &std::path::Path,
+    tenant_id: &str,
+    roots: &[PathBuf],
+    full: bool,
+) -> Result<Vec<IndexedDocument>, crate::CliError> {
+    let config = crate::load_config(config_path)?;
+    let _tenant = config
+        .get_tenant(tenant_id)
+        .ok_or_else(|| crate::CliError::Other("tenant unavailable".into()))?;
+    let mut all = Vec::new();
+    for root in roots {
+        let sync = FolderSync::new(root.clone(), config.clone());
+        if full {
+            sync.manual_refresh().await;
+        } else {
+            sync.manual_refresh_incremental().await;
+        }
+        all.extend(sync.get_indexed().await);
+    }
+    Ok(all)
+}
+
 pub async fn run_manual_refresh(
     config_path: &std::path::Path,
     full: bool,

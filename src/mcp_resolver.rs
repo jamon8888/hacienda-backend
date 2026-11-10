@@ -1,6 +1,9 @@
 //! Default principal resolver implementation for testing/standalone use.
 
-use crate::mcp_types::{Principal, PrincipalResolver, ResolutionContext, ResolverError};
+use crate::{
+    config::HaciendaConfig,
+    mcp_types::{Capability, Principal, PrincipalResolver, ResolutionContext, ResolverError},
+};
 use std::collections::HashMap;
 
 /// Simple resolver that uses a static map of tokens to principals.
@@ -14,35 +17,43 @@ pub struct DefaultResolver {
 }
 
 impl DefaultResolver {
+    /// Construct only from explicit configuration; no implicit owner/default exists.
+    pub fn from_config(config: &HaciendaConfig, principal_id: &str) -> Result<Self, ResolverError> {
+        let binding = config
+            .principal(principal_id)
+            .ok_or(ResolverError::AuthRequired)?;
+        let capabilities = match binding.role {
+            crate::authz::PrincipalRole::Owner => vec![
+                Capability::Search,
+                Capability::Sync,
+                Capability::Status,
+                Capability::AttachLocalDoc,
+            ],
+            crate::authz::PrincipalRole::Agent => {
+                vec![Capability::Search, Capability::AttachLocalDoc]
+            }
+            crate::authz::PrincipalRole::Service => vec![
+                Capability::Search,
+                Capability::Sync,
+                Capability::Status,
+                Capability::AttachLocalDoc,
+            ],
+        };
+        let principal = Principal {
+            id: binding.principal_id.clone(),
+            name: binding.principal_id.clone(),
+            capabilities,
+            tenant_ids: binding.tenant_ids.clone(),
+        };
+        Ok(Self {
+            principals: HashMap::new(),
+            default_principal: Some(principal),
+        })
+    }
+
     pub fn new() -> Self {
-        let mut principals = HashMap::new();
-
-        // Owner principal - full capabilities
-        principals.insert(
-            "owner".to_string(),
-            Principal {
-                id: "owner".to_string(),
-                name: "Owner".to_string(),
-                capabilities: vec![
-                    crate::mcp_types::Capability::Search,
-                    crate::mcp_types::Capability::Sync,
-                    crate::mcp_types::Capability::Status,
-                ],
-            },
-        );
-
-        // Agent principal - limited capabilities
-        principals.insert(
-            "agent".to_string(),
-            Principal {
-                id: "agent".to_string(),
-                name: "Agent".to_string(),
-                capabilities: vec![crate::mcp_types::Capability::Search],
-            },
-        );
-
         Self {
-            principals,
+            principals: HashMap::new(),
             default_principal: None,
         }
     }
