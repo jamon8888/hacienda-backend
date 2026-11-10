@@ -250,16 +250,17 @@ where
         // Capability check (registry already filters, but double-check here).
         // Tenant IDs in payloads are selectors only; authorization comes solely
         // from the authenticated principal binding and fails closed.
-        let has_cap = |cap: Capability| principal.capabilities.contains(&cap);
-        if let Some(args) = request.arguments.as_ref()
-            && let Some(tenant) = args.get("tenant_id").and_then(|v| v.as_str())
-            && !principal.tenant_ids.contains(tenant)
-        {
+        if !payload_tenant_authorized(&principal, request.arguments.as_ref()) {
             if request.name == "attach_local_doc" {
+                let tenant = request
+                    .arguments
+                    .as_ref()
+                    .and_then(|a| a.get("tenant_id"))
+                    .and_then(|v| v.as_str());
                 audit_authz(
                     &self.state,
                     &principal,
-                    Some(tenant),
+                    tenant,
                     "deny",
                     "tenant_unauthorized",
                     "ERROR_CODE",
@@ -270,6 +271,7 @@ where
             }
             return Err(ErrorData::invalid_params("tenant unauthorized", None));
         }
+        let has_cap = |cap: Capability| principal.capabilities.contains(&cap);
         if request.name == "attach_local_doc" && !has_cap(Capability::AttachLocalDoc) {
             audit_authz(
                 &self.state,
@@ -707,6 +709,19 @@ fn authz_reason(error: &AuthzError) -> &'static str {
 }
 
 // ===== Tool handlers =====
+
+/// A payload `tenant_id` is a selector among the principal's authorized tenants
+/// only; it can never expand access. No `tenant_id` in the payload defers to the
+/// per-handler single-binding resolution. (issue #22)
+fn payload_tenant_authorized(
+    principal: &Principal,
+    args: Option<&serde_json::Map<String, Value>>,
+) -> bool {
+    match args.and_then(|a| a.get("tenant_id")).and_then(|v| v.as_str()) {
+        Some(tenant) => principal.tenant_ids.contains(tenant),
+        None => true,
+    }
+}
 
 async fn handle_search(
     state: &ServerState,
@@ -1221,8 +1236,7 @@ async fn healthz() -> Json<Value> {
 }
 
 #[cfg(test)]
-mod authz_manifest_tests {
-    use super::*;
+mod authz_manifest_tests {    use super::*;
     use std::collections::HashSet;
 
     #[test]
@@ -1280,5 +1294,191 @@ mod authz_manifest_tests {
                 .map(|m| m.contains_key(PathBuf::from("/a/doc").as_path()))
                 .unwrap_or(false)
         );
+    }
+}
+
+#[cfg(test)]
+mod tenant_authz_tests {
+    use super::*;
+    use crate::config::{HaciendaConfig, TenantConfig};
+    use std::collections::HashSet;
+
+    fn extra_tenant(tenant_id: &str) -> TenantConfig {
+        TenantConfig {
+            tenant_id: tenant_id.into(),
+            folder_roots: Vec::new(),
+            name: tenant_id.into(),
+            lance_dir: None,
+            tantivy_dir: None,
+            vault_dir: None,
+            encryption: None,
+            kms: None,
+            active: true,
+        }
+    }
+
+    fn test_config() -> HaciendaConfig {
+        let mut config: HaciendaConfig =
+            toml::from_str("default_tenant = \"flux-a\"\n[[tenants]]\ntenant_id = \"flux-a\"\nname = \"a\"\n")
+                .unwrap();
+        config.tenants.push(extra_tenant("flux-b"));
+        config
+    }
+
+    /// Denial text must be generic: no tenant names, no storage paths, no
+    /// counts, no existence hints. (issue #22, acceptance 1/5)
+    fn assert_generic_denial(message: &str) {
+        for leaked in [
+            "flux-a",
+            "flux-b",
+            "ghost",
+            "/",
+            "lance",
+            "tantivy",
+            "vault",
+            "exists",
+            "credential",
+        ] {
+            assert!(
+                !message.contains(leaked),
+                "denial text leaked {leaked:?}: {message}"
+            );
+        }
+        // No counters or sizes that an attacker could correlate with data.
+        assert!(
+            !message.chars().any(|c| c.is_ascii_digit()),
+            "denial text contains a numeric hint: {message}"
+        );
+    }
+
+    fn principal_bound_to(tenant: &str) -> Principal {
+        Principal {
+            id: "p".into(),
+            name: "p".into(),
+            capabilities: vec![
+                Capability::Search,
+                Capability::Sync,
+                Capability::Status,
+                Capability::AttachLocalDoc,
+                Capability::GraphRag,
+            ],
+            tenant_ids: HashSet::from([tenant.into()]),
+        }
+    }
+
+    fn args() -> serde_json::Map<String, Value> {
+        serde_json::Map::new()
+    }
+
+    /// A payload tenant_id selects among authorized tenants; it can never grant
+    /// access to an unbound tenant, and omission defers to the handler.
+    #[test]
+    fn payload_tenant_id_is_selector_never_grant() {
+        let principal = principal_bound_to("flux-a");
+        let mut other = args();
+        other.insert("tenant_id".into(), "flux-b".into());
+        let mut ghost = args();
+        ghost.insert("tenant_id".into(), "ghost".into());
+
+        assert!(payload_tenant_authorized(&principal, None));
+        assert!(!payload_tenant_authorized(
+            &principal,
+            Some(&other)
+        ));
+        assert!(!payload_tenant_authorized(&principal, Some(&ghost)));
+        // Payload authorization does not depend on the caller's tool or role.
+        let mut own = args();
+        own.insert("tenant_id".into(), "flux-a".into());
+        assert!(payload_tenant_authorized(&principal, Some(&own)));
+    }
+
+    /// Search against an unknown tenant fails before storage access with a
+    /// generic message (and no engine is ever minted for it).
+    #[tokio::test]
+    async fn search_denies_unknown_tenant_generically() {
+        let manager = TenantSearchEngineManager::new(test_config()).await.unwrap();
+        let state = ServerState {
+            registry: Arc::new(RwLock::new(ToolRegistry::new())),
+            fingerprint: None,
+            search_engine: Some(Arc::new(manager)),
+            config_path: None,
+            audit_log: None,
+            folder_roots: HashMap::new(),
+            processed_index: Arc::new(RwLock::new(HashMap::new())),
+        };
+
+        let mut ghost = args();
+        ghost.insert("tenant_id".into(), "ghost".into());
+        let err = handle_search(&state, Some(ghost)).await.unwrap_err();
+        assert_generic_denial(&err.message);
+
+        // Authorized tenant with no payload tenant_id fails closed on missing
+        // arguments rather than silently degrading.
+        let err = handle_search(&state, None).await.unwrap_err();
+        assert_generic_denial(&err.message);
+    }
+
+    /// Sync (indexing + rebuild) with a cross-tenant tenant_id is refused with
+    /// the same generic denial, before any folder or index access.
+    #[tokio::test]
+    async fn sync_denies_cross_tenant_generically() {
+        let principal_a = principal_bound_to("flux-a");
+        let mut other = args();
+        other.insert("tenant_id".into(), "flux-b".into());
+
+        let err = handle_sync(
+            &ServerState {
+                registry: Arc::new(RwLock::new(ToolRegistry::new())),
+                fingerprint: None,
+                search_engine: None,
+                config_path: None,
+                audit_log: None,
+                folder_roots: HashMap::new(),
+                processed_index: Arc::new(RwLock::new(HashMap::new())),
+            },
+            Some(other),
+            &principal_a,
+        )
+        .await
+        .unwrap_err();
+        assert_generic_denial(&err.message);
+    }
+
+    /// attach_local_doc across tenants is denied before attachment occurs.
+    #[test]
+    fn attach_gate_denies_cross_tenant() {
+        let principal_a = principal_bound_to("flux-a");
+        assert!(!payload_tenant_authorized(
+            &principal_a,
+            Some(&{
+                let mut a = args();
+                a.insert("tenant_id".into(), "flux-b".into());
+                a
+            })
+        ));
+        // Denial text for attach stays generic ("document unavailable").
+        assert_generic_denial("document unavailable");
+    }
+
+    /// Status tool exposes no tenant name and no existence signal.
+    #[tokio::test]
+    async fn status_response_carries_no_tenant_hints() {
+        let state = ServerState {
+            registry: Arc::new(RwLock::new(ToolRegistry::new())),
+            fingerprint: None,
+            search_engine: None,
+            config_path: None,
+            audit_log: None,
+            folder_roots: HashMap::new(),
+            processed_index: Arc::new(RwLock::new(HashMap::new())),
+        };
+        let result = handle_status(&state, Some(args())).await.unwrap();
+        let text: String = result
+            .content
+            .iter()
+            .filter_map(|c| c.as_text().map(|t| t.text.clone()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_generic_denial(&text);
     }
 }

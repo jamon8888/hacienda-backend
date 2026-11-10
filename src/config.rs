@@ -872,3 +872,125 @@ impl HaciendaConfig {
         self.vault_dir(None)
     }
 }
+
+#[cfg(test)]
+mod tenant_path_tests {
+    use super::*;
+
+    /// Unique per-test temp directory; cleaned up on drop.
+    struct TempDir(std::path::PathBuf);
+
+    impl TempDir {
+        fn new(label: &str) -> Self {
+            let dir = std::env::temp_dir()
+                .join(format!("hacienda-cfg-{}-{}", label, std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn config_with_tenant(tenant_id: &str, custom_dirs: Option<(&str, &str, &str)>) -> HaciendaConfig {
+        let dirs_block = match custom_dirs {
+            Some((lance, tantivy, vault)) => format!(
+                "lance_dir = \"{lance}\"\ntantivy_dir = \"{tantivy}\"\nvault_dir = \"{vault}\"\n"
+            ),
+            None => String::new(),
+        };
+        toml::from_str(&format!(
+            "default_tenant = \"{tid}\"\n\
+             [[principals]]\nprincipal_id = \"owner\"\nrole = \"owner\"\n\
+             tenant_ids = [\"{tid}\"]\n\
+             \n[[tenants]]\ntenant_id = \"{tid}\"\nname = \"t\"\n{dirs_block}",
+            tid = tenant_id
+        ))
+        .unwrap()
+    }
+
+    /// Tenant A, B and default must resolve to physically distinct index,
+    /// vault and manifest/fingerprint storage locations (issue #22, acceptance 3).
+    #[test]
+    fn per_tenant_storage_paths_are_distinct() {
+        let config = config_with_tenant("t-a", None);
+        let mut config = config.clone();
+        let tenant_b = TenantConfig {
+            tenant_id: "t-b".into(),
+            folder_roots: Vec::new(),
+            name: "t-b".into(),
+            lance_dir: None,
+            tantivy_dir: None,
+            vault_dir: None,
+            encryption: None,
+            kms: None,
+            active: true,
+        };
+        config.tenants.push(tenant_b);
+
+        for (a, b) in [
+            (config.lance_dir(Some("t-a")), config.lance_dir(Some("t-b"))),
+            (
+                config.tantivy_dir(Some("t-a")),
+                config.tantivy_dir(Some("t-b")),
+            ),
+            (config.vault_dir(Some("t-a")), config.vault_dir(Some("t-b"))),
+        ] {
+            assert_ne!(a, b);
+            assert!(
+                a.ends_with("t-a"),
+                "tenant path must be derived from tenant A, got {a:?}"
+            );
+            assert!(
+                b.ends_with("t-b"),
+                "tenant path must be derived from tenant B, got {b:?}"
+            );
+        }
+        // Requesting an unknown tenant never falls back to the default tenant's path.
+        assert_ne!(config.lance_dir(Some("ghost")), config.lance_dir(None));
+        assert!(
+            config.lance_dir(Some("ghost")).ends_with("ghost"),
+            "requested tenant id must drive the path"
+        );
+    }
+
+    /// Explicit per-tenant directories must be honored unchanged (issue #22,
+    /// tenant-path binding) — a tenant's lance dir is never coerced to the default.
+    #[test]
+    fn custom_dirs_are_honored_per_tenant() {
+        let tmp = TempDir::new("custom");
+        let a = tmp.0.join("e");
+        std::fs::create_dir_all(&a).unwrap();
+        let b = tmp.0.join("r");
+        std::fs::create_dir_all(&b).unwrap();
+        let c = tmp.0.join("v");
+        std::fs::create_dir_all(&c).unwrap();
+        let config = config_with_tenant(
+            "t-a",
+            Some((a.to_str().unwrap(), b.to_str().unwrap(), c.to_str().unwrap())),
+        );
+        assert_eq!(config.lance_dir(Some("t-a")), a);
+        assert_eq!(config.tantivy_dir(Some("t-a")), b);
+        assert_eq!(config.vault_dir(Some("t-a")), c);
+        assert_ne!(config.lance_dir(Some("t-a")), config.default_lance_dir());
+    }
+
+    /// Single-tenant mode: the resolved scope is exactly the principal's bound
+    /// tenant, and the default tenant stays isolated from any other tenant id.
+    #[test]
+    fn default_tenant_scopes_to_configured_default() {
+        let config = config_with_tenant("t-one", None);
+        assert_eq!(config.scope(Some("t-one")).as_deref(), Some("t-one"));
+        assert_eq!(config.scope(None).as_deref(), Some("t-one"));
+        // A different tenant id never maps into the default tenant's scope.
+        assert_ne!(config.scope(Some("t-two")), config.scope(None));
+        // The principal binding authorizes the configured tenant only.
+        let binding = &config.principals[0];
+        assert!(binding.authorizes("t-one"));
+        assert!(!binding.authorizes("t-two"));
+    }
+}

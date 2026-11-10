@@ -1114,10 +1114,123 @@ impl SearchEngine {
 }
 
 #[cfg(test)]
-mod tests {
+mod tenant_path_tests {
+    use super::*;
+    use crate::config::{HaciendaConfig, TenantConfig};
+
+    fn config_with_tenant(tenant_id: &str) -> HaciendaConfig {
+        toml::from_str(&format!(
+            "default_tenant = \"{tid}\"\n\
+             [[tenants]]\ntenant_id = \"{tid}\"\nname = \"t\"\n",
+            tid = tenant_id
+        ))
+        .unwrap()
+    }
+
+    fn extra_tenant(tenant_id: &str) -> TenantConfig {
+        TenantConfig {
+            tenant_id: tenant_id.into(),
+            folder_roots: Vec::new(),
+            name: tenant_id.into(),
+            lance_dir: None,
+            tantivy_dir: None,
+            vault_dir: None,
+            encryption: None,
+            kms: None,
+            active: true,
+        }
+    }
+
+    /// Unique per-test temp directory; cleaned up on drop (LanceDB paths only).
+    #[cfg(feature = "basemind")]
+    struct TempDir(std::path::PathBuf);
+
+    #[cfg(feature = "basemind")]
+    impl TempDir {
+        fn new(label: &str) -> Self {
+            let dir =
+                std::env::temp_dir().join(format!("hacienda-srch-{}-{}", label, std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+    }
+
+    #[cfg(feature = "basemind")]
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// The manager keys engines strictly by the requested (authorized) tenant —
+    /// one engine per active tenant, and no engine exists for an unknown tenant
+    /// (issue #22, acceptance 4/6).
     #[tokio::test]
-    #[ignore] // TODO: update to use TenantSearchEngineManager and new config fields
-    async fn test_search_engine_bm25_only() {
-        // TODO: implement test with TenantSearchEngineManager
+    async fn manager_creates_engine_per_requested_tenant() {
+        let mut config = config_with_tenant("slice-a");
+        config.tenants.push(extra_tenant("slice-b"));
+        let manager = TenantSearchEngineManager::new(config).await.unwrap();
+
+        assert_eq!(manager.get_engine("slice-a").unwrap().tenant_id(), "slice-a");
+        assert_eq!(manager.get_engine("slice-b").unwrap().tenant_id(), "slice-b");
+        // An unknown tenant never mints an engine; the surface fails closed
+        // before any storage access and reports a generic denial.
+        assert!(manager.get_engine("ghost").is_none());
+    }
+
+    /// Default tenant: `default_engine` is bound to the configured default and
+    /// must not leak an engine of a different tenant. (issue #22, acceptance 6)
+    #[tokio::test]
+    async fn default_engine_is_the_configured_default_tenant() {
+        let config = config_with_tenant("only");
+        let manager = TenantSearchEngineManager::new(config).await.unwrap();
+        assert_eq!(manager.default_engine().unwrap().tenant_id(), "only");
+        assert!(manager.get_engine("other").is_none());
+    }
+
+    /// Opening tenant A must touch only tenant A's LanceDB directory and never
+    /// create or read tenant B's or the default tenant's path. Every tenant is
+    /// given an explicit temp directory, so no tenant ever touches the shared
+    /// default location under `~/.local/share/hacienda`. (issue #22, acceptance 2)
+    #[cfg(feature = "basemind")]
+    #[tokio::test]
+    async fn opening_tenant_a_never_creates_default_or_b_lance_paths() {
+        let tmp = TempDir::new("lanceiso");
+        let dir_a = tmp.0.join("a");
+        let dir_b = tmp.0.join("b");
+        let dir_def = tmp.0.join("default");
+
+        let mut config = config_with_tenant("slice-a");
+        let tenant_conf = extra_tenant("slice-b");
+        let tenant_a = config.tenants.get_mut(0).unwrap();
+        tenant_a.lance_dir = Some(dir_a.to_string_lossy().into_owned());
+        let mut tenant_b = tenant_conf;
+        tenant_b.lance_dir = Some(dir_b.to_string_lossy().into_owned());
+        config.tenants.push(tenant_b);
+        // The default tenant gets its own explicit directory, so "untouched"
+        // assertions are meaningful instead of colliding with tenant A's path.
+        config.default_tenant = "slice-default".into();
+        let mut tenant_default = extra_tenant("slice-default");
+        tenant_default.lance_dir = Some(dir_def.to_string_lossy().into_owned());
+        config.tenants.push(tenant_default);
+
+        // Open ONLY tenant A's engine (exactly where `new_for_tenant` is the fix).
+        let _engine = SearchEngine::new_for_tenant(&config, "slice-a").await.unwrap();
+
+        assert!(
+            dir_a.exists(),
+            "tenant A's requested LanceDB path must be opened/created"
+        );
+        for (label, dir) in [
+            ("tenant B", dir_b.as_path()),
+            ("default tenant", dir_def.as_path()),
+        ] {
+            assert!(
+                !dir.exists(),
+                "opening tenant A must not create the {label} LanceDB path"
+            );
+        }
     }
 }
+

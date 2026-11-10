@@ -31,8 +31,19 @@ fn cli_auth(
 ) -> Result<CliAuthContext, CliError> {
     let principal_id = std::env::var("HACIENDA_PRINCIPAL")
         .map_err(|_| CliError::Other("HACIENDA_PRINCIPAL is required".into()))?;
+    cli_auth_for(config, &principal_id, requested)
+}
+
+/// Principal-to-tenant authorization for CLI surfaces: the requested tenant is
+/// a selector among the principal's explicitly bound tenant IDs, never a grant.
+/// Fail-closed: missing/ambiguous/multi binding denies access. (issue #22)
+fn cli_auth_for(
+    config: &hacienda_backend::HaciendaConfig,
+    principal_id: &str,
+    requested: Option<&str>,
+) -> Result<CliAuthContext, CliError> {
     let binding = config
-        .principal(&principal_id)
+        .principal(principal_id)
         .ok_or_else(|| CliError::Other("principal is not bound in configuration".into()))?;
     let tenant_id = match requested {
         Some(t) if binding.authorizes(t) => t.to_owned(),
@@ -202,4 +213,88 @@ async fn run_mcp(args: McpArgs) -> Result<(), CliError> {
         _ => return Err(format!("Unknown transport: {}", args.transport).into()),
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod cli_auth_tests {
+    use super::*;
+    use clap::Parser;
+
+    fn config_with_principals() -> hacienda_backend::HaciendaConfig {
+        toml::from_str(
+            "default_tenant = \"core-a\"\n\
+             [[tenants]]\ntenant_id = \"core-a\"\nname = \"a\"\n\
+             [[tenants]]\ntenant_id = \"core-b\"\nname = \"b\"\n\
+             [[principals]]\nprincipal_id = \"owner\"\nrole = \"owner\"\n\
+             tenant_ids = [\"core-a\"]\n\
+             [[principals]]\nprincipal_id = \"ambidextrous\"\nrole = \"owner\"\n\
+             tenant_ids = [\"core-a\", \"core-b\"]\n",
+        )
+        .unwrap()
+    }
+
+    /// An explicitly requested tenant outside the principal's binding is denied
+    /// generically; the denial must not name any tenant. (issue #22, acceptance 5/7)
+    #[test]
+    fn request_denies_tenant_not_bound_to_principal() {
+        let config = config_with_principals();
+        for principal in ["owner", "ambidextrous"] {
+            let err = cli_auth_for(&config, principal, Some("ghost")).unwrap_err();
+            let message = err.to_string();
+            assert!(message.contains("not bound"), "unexpected denial: {message}");
+            assert!(!message.contains("core-a"));
+            assert!(!message.contains("core-b"));
+            assert!(!message.contains("ghost"));
+        }
+    }
+
+    /// The resolved tenant used by the CLI always comes from the configured
+    /// principal authorization, not from the payload. (acceptance 6/7)
+    #[test]
+    fn resolved_tenant_stays_within_principal_authorization() {
+        let config = config_with_principals();
+        assert_eq!(
+            cli_auth_for(&config, "owner", Some("core-a")).unwrap().tenant_id,
+            "core-a"
+        );
+        assert_eq!(
+            cli_auth_for(&config, "ambidextrous", Some("core-b"))
+                .unwrap()
+                .tenant_id,
+            "core-b"
+        );
+        // A principal bound to exactly one tenant may omit --tenant.
+        assert_eq!(
+            cli_auth_for(&config, "owner", None).unwrap().tenant_id,
+            "core-a"
+        );
+    }
+
+    /// A principal with several bindings cannot skip tenant selection, and an
+    /// unknown principal fails closed. (acceptance 7)
+    #[test]
+    fn ambiguous_and_unknown_principals_fail_closed() {
+        let config = config_with_principals();
+        assert!(cli_auth_for(&config, "ambidextrous", None).is_err());
+        assert!(cli_auth_for(&config, "unknown", None).is_err());
+        assert!(cli_auth_for(&config, "unknown", Some("core-a")).is_err());
+    }
+
+    /// The CLI argument surface keeps accepting the documented flags.
+    #[test]
+    fn cli_parses_tenant_selector() {
+        let cli = Cli::try_parse_from([
+            "hacienda-backend",
+            "sync",
+            "--config",
+            "basemind.toml",
+            "--tenant",
+            "core-a",
+        ])
+        .unwrap();
+        let Commands::Sync(args) = cli.command else {
+            panic!("expected sync command");
+        };
+        assert_eq!(args.tenant.as_deref(), Some("core-a"));
+    }
 }
