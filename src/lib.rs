@@ -3,12 +3,14 @@ pub mod authz;
 pub mod cli;
 pub mod cli_error;
 pub mod config;
+pub mod custody;
 pub mod disclosure_ledger;
 pub mod dual_store;
 pub mod encryption;
 pub mod folder_sync;
 pub mod gaze_engine;
 pub mod index_projection;
+pub mod keychain;
 pub mod mcp_resolver;
 pub mod mcp_server;
 pub mod mcp_types;
@@ -22,6 +24,9 @@ pub use authz::{
 pub use cli::{Cli, Commands, DoctorArgs, ExportRecoveryArgs, McpArgs, RehydrateArgs, SyncArgs};
 pub use cli_error::CliError;
 pub use config::{ConfigError, HaciendaConfig, RedactionConfig, doctor_checks, load_config};
+pub use custody::{
+    CustodyArtifacts, CustodyError, CustodyManifest, DocumentIdentity, VerifiedCustody,
+};
 pub use disclosure_ledger::{
     DisclosureHandle, DisclosureLedger, DisclosureRequest, DisclosureStatus,
 };
@@ -33,6 +38,7 @@ pub use folder_sync::{
 };
 pub use gaze_engine::{Detection, EngineError, GazeEngine};
 pub use index_projection::{ProjectionConfig, SensitivityTier, project_document, project_token};
+pub use keychain::{KeychainKms, validate_assurance_mode};
 pub use mcp_resolver::DefaultResolver;
 pub use mcp_server::{McpServer, ToolRegistry};
 pub use mcp_types::{Capability, Principal, PrincipalResolver, ResolutionContext, ResolverError};

@@ -1,7 +1,15 @@
 //! CLI for hacienda-backend: rehydration, audit, and doctor commands.
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
+
+/// Assurance mode is explicit at the CLI boundary and must agree with the
+/// loaded configuration. Production is the safe default.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum AssuranceModeArg {
+    Production,
+    Development,
+}
 
 #[derive(Parser, Debug)]
 #[command(
@@ -10,6 +18,9 @@ use std::path::PathBuf;
     about = "PII-safe document backend for Claude"
 )]
 pub struct Cli {
+    /// Custody policy for this invocation. Production requires macOS Keychain.
+    #[arg(long, global = true, value_enum, default_value_t = AssuranceModeArg::Production)]
+    pub assurance_mode: AssuranceModeArg,
     #[command(subcommand)]
     pub command: Commands,
 }
@@ -53,17 +64,17 @@ pub struct RehydrateArgs {
     #[arg(long, short = 'v', required = true)]
     pub vault_map: PathBuf,
 
-    /// Path to the gaze manifest file (optional, for audit context).
-    #[arg(long, short = 'm')]
+    /// Path to the custody manifest file.
+    #[arg(long, short = 'm', required = true)]
     pub manifest: Option<PathBuf>,
+
+    /// Path to the encrypted Gaze SensitiveSnapshot/session artifact.
+    #[arg(long, short = 's', required = true)]
+    pub snapshot: Option<PathBuf>,
 
     /// Output path for rehydrated content (stdout if omitted).
     #[arg(long, short = 'o')]
     pub output: Option<PathBuf>,
-
-    /// Request confirmation bypass; accepted only from an interactive terminal.
-    #[arg(long, short = 'y')]
-    pub yes: bool,
 
     /// Path to the original document used to verify the vault binding.
     #[arg(long)]
@@ -102,6 +113,10 @@ pub struct ExportRecoveryArgs {
     /// Path to the gaze manifest file.
     #[arg(long, short = 'm', required = true)]
     pub manifest: PathBuf,
+
+    /// Path to the encrypted Gaze SensitiveSnapshot/session artifact.
+    #[arg(long, short = 's', required = true)]
+    pub snapshot: PathBuf,
 }
 
 /// Arguments for the sync command.

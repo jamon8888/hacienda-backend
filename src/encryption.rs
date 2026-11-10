@@ -10,86 +10,21 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::config::EncryptionConfig;
 
-/// Service/account names are identifiers, never key material.
-pub const VAULT_KEYCHAIN_SERVICE: &str = "hacienda-backend-vault";
-pub const VAULT_KEYCHAIN_ACCOUNT: &str = "vault-key-v1";
-
-/// Custody seam for vault encryption. Implementations must never expose key material in logs.
-pub trait VaultKeyProvider: Send + Sync {
-    fn key(&self) -> Result<[u8; 32]>;
-}
-
-/// Explicit development/test fixture. Production constructors reject this provider.
-pub struct FixtureVaultKeyProvider(pub [u8; 32]);
-impl VaultKeyProvider for FixtureVaultKeyProvider {
-    fn key(&self) -> Result<[u8; 32]> {
-        Ok(self.0)
-    }
-}
-
-/// macOS Keychain-backed vault custody.
-pub struct KeychainVaultKeyProvider;
-impl VaultKeyProvider for KeychainVaultKeyProvider {
-    fn key(&self) -> Result<[u8; 32]> {
-        #[cfg(target_os = "macos")]
-        {
-            use security_framework::passwords::get_generic_password;
-            let bytes = get_generic_password(VAULT_KEYCHAIN_SERVICE, VAULT_KEYCHAIN_ACCOUNT)
-                .context("vault Keychain item is unavailable")?;
-            let key: [u8; 32] = bytes
-                .as_slice()
-                .try_into()
-                .map_err(|_| anyhow::anyhow!("vault Keychain item has invalid length"))?;
-            Ok(key)
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            Err(anyhow::anyhow!(
-                "production vault custody requires macOS Keychain"
-            ))
-        }
-    }
-}
+pub use crate::keychain::{
+    FixtureVaultKeyProvider, KeychainKms, KeychainVaultKeyProvider, VAULT_KEYCHAIN_ACCOUNT,
+    VAULT_KEYCHAIN_SERVICE, VaultKeyProvider,
+};
 
 /// Select custody from validated configuration. Production never accepts a
 /// fixture key; development/test fixtures must be explicitly supplied.
 pub fn vault_key_provider(config: &EncryptionConfig) -> Result<Box<dyn VaultKeyProvider>> {
-    let mode = if config.assurance_mode.is_production() {
-        "production"
-    } else {
-        "development"
-    };
-    select_vault_key_provider(mode)
+    crate::keychain::provider_for_config(config)
 }
 
 /// Backwards-compatible custody entry point for CLI paths that have not yet
-/// been given a loaded config. The environment is an explicit development/test
-/// seam only; production still defaults to fail-closed Keychain custody.
+/// been given a loaded config. It never returns key material.
 pub fn default_vault_key_provider() -> Result<Box<dyn VaultKeyProvider>> {
-    let mode = std::env::var("HACIENDA_ASSURANCE_MODE").unwrap_or_else(|_| "production".to_owned());
-    select_vault_key_provider(&mode)
-}
-
-fn select_vault_key_provider(mode: &str) -> Result<Box<dyn VaultKeyProvider>> {
-    match mode {
-        "production" => {
-            let provider = KeychainVaultKeyProvider;
-            provider
-                .key()
-                .context("production vault Keychain custody unavailable")?;
-            Ok(Box::new(provider))
-        }
-        "development" | "test" => {
-            let raw = std::env::var("HACIENDA_VAULT_FIXTURE_KEY").context(
-                "development/test requires explicit ephemeral HACIENDA_VAULT_FIXTURE_KEY",
-            )?;
-            let bytes = blake3::hash(raw.as_bytes());
-            Ok(Box::new(FixtureVaultKeyProvider(*bytes.as_bytes())))
-        }
-        _ => Err(anyhow::anyhow!(
-            "invalid assurance mode or development fixture refused"
-        )),
-    }
+    crate::keychain::default_provider()
 }
 
 /// Authenticated vault blob bound to fingerprint and document identity.
@@ -410,6 +345,7 @@ impl EncryptionEngine {
         config: EncryptionConfig,
         kms_config: Option<crate::config::KmsConfig>,
     ) -> Result<Self> {
+        crate::keychain::validate_assurance_mode(&config, kms_config.as_ref())?;
         // Resolve custody from the validated config rather than silently using
         // HACIENDA_ASSURANCE_MODE when an application supplies configuration.
         // This also preserves production's fail-closed Keychain requirement.
@@ -746,16 +682,14 @@ impl LocalKmsClient {
 
 #[async_trait::async_trait]
 impl KmsClient for LocalKmsClient {
-    async fn wrap_key(&self, _key: &[u8; 32]) -> Result<WrappedKey> {
-        Err(anyhow::anyhow!(
-            "experimental local KMS is disabled: authenticated KMS required"
-        ))
+    async fn wrap_key(&self, key: &[u8; 32]) -> Result<WrappedKey> {
+        // Local KMS is a development-only authenticated envelope. Production
+        // rejects this provider before construction in `EncryptionEngine::new`.
+        wrap_key_with_master(&MasterKey::from_bytes(self._key), key)
     }
 
-    async fn unwrap_key(&self, _wrapped: &WrappedKey) -> Result<[u8; 32]> {
-        Err(anyhow::anyhow!(
-            "experimental local KMS is disabled: authenticated KMS required"
-        ))
+    async fn unwrap_key(&self, wrapped: &WrappedKey) -> Result<[u8; 32]> {
+        unwrap_key_with_master(&MasterKey::from_bytes(self._key), wrapped)
     }
 
     fn provider_name(&self) -> &str {

@@ -2,8 +2,8 @@
 
 use crate::authz::PrincipalBinding;
 use crate::cli::{ExportRecoveryArgs, RehydrateArgs};
-use crate::dual_store::RehydrationManifest;
-use crate::encryption::{decrypt_vault_blob, default_vault_key_provider, encrypt_vault_blob};
+use crate::custody::{CustodyManifest, DocumentIdentity, VerifiedCustody, verify_files};
+use crate::encryption::{default_vault_key_provider, encrypt_vault_blob};
 use console::style;
 use dialoguer::Confirm;
 use std::fs;
@@ -35,6 +35,8 @@ pub enum RehydrationError {
     Custody(String),
     #[error("principal is not authorized for tenant")]
     UnauthorizedTenant,
+    #[error("atomic custody verification failed: {0}")]
+    AtomicCustody(String),
 }
 
 /// Result of a rehydration operation (for audit logging).
@@ -56,41 +58,43 @@ pub fn load_vault_map_verified<P: AsRef<Path>, M: AsRef<Path>>(
     document_path: Option<&Path>,
     passphrase: &str,
 ) -> Result<RehydrationMap, RehydrationError> {
-    let _ = passphrase;
-    let manifest: RehydrationManifest = serde_json::from_slice(&load_manifest(manifest_path)?)
+    let _ = (path, manifest_path, document_path, passphrase);
+    Err(RehydrationError::AtomicCustody(
+        "encrypted SensitiveSnapshot/session is required; use the atomic custody loader".to_owned(),
+    ))
+}
+
+/// Load all owner-vault artifacts and verify them as one atomic unit.
+pub fn load_custody_verified(
+    vault_map_path: &Path,
+    manifest_path: &Path,
+    snapshot_path: &Path,
+    document_path: Option<&Path>,
+) -> Result<VerifiedCustody, RehydrationError> {
+    let manifest_bytes = load_manifest(manifest_path)?;
+    let manifest: CustodyManifest = serde_json::from_slice(&manifest_bytes)
         .map_err(|e| RehydrationError::ManifestParse(e.to_string()))?;
-    let expected_binding = if let Some(document_path) = document_path {
-        blake3::hash(&fs::read(document_path)?).to_hex().to_string()
+    let expected_document = if let Some(document_path) = document_path {
+        let content_hash = blake3::hash(&fs::read(document_path)?).to_hex().to_string();
+        DocumentIdentity::new(
+            manifest.document.tenant_id.clone(),
+            manifest.document.document_id.clone(),
+            content_hash,
+        )
     } else {
-        manifest.document_binding.clone()
+        manifest.document.clone()
     };
-    let blob = fs::read(path)?;
-    let envelope: crate::encryption::VaultBlob =
-        serde_json::from_slice(&blob).map_err(|e| RehydrationError::Decryption(e.to_string()))?;
-    if envelope.fingerprint != manifest.fingerprint.as_str() {
-        return Err(RehydrationError::FingerprintMismatch {
-            expected: manifest.fingerprint.as_str().to_owned(),
-            actual: envelope.fingerprint,
-        });
-    }
-    if envelope.document_binding != expected_binding {
-        return Err(RehydrationError::DocumentBindingMismatch {
-            expected: expected_binding,
-            actual: envelope.document_binding,
-        });
-    }
-    // The expected values above come from the requested artifact/document, not
-    // from the envelope, and are checked before custody/decryption.
     let provider =
         default_vault_key_provider().map_err(|e| RehydrationError::Decryption(e.to_string()))?;
-    let plaintext = decrypt_vault_blob(
-        &blob,
-        &manifest.fingerprint.0,
-        &expected_binding,
+    verify_files(
+        manifest_path,
+        snapshot_path,
+        vault_map_path,
+        &expected_document,
+        &manifest.fingerprint,
         provider.as_ref(),
     )
-    .map_err(|e| RehydrationError::Decryption(e.to_string()))?;
-    serde_json::from_slice(&plaintext).map_err(|e| RehydrationError::Decryption(e.to_string()))
+    .map_err(|e| RehydrationError::AtomicCustody(e.to_string()))
 }
 
 /// Legacy API retained for callers that do not have the requested manifest.
@@ -175,6 +179,7 @@ pub async fn run_rehydrate(
     binding: &PrincipalBinding,
     tenant_id: &str,
 ) -> Result<RehydrationAuditRecord, RehydrationError> {
+    let _ = vault_passphrase;
     if !binding.authorizes(tenant_id) {
         return Err(RehydrationError::UnauthorizedTenant);
     }
@@ -183,29 +188,43 @@ pub async fn run_rehydrate(
     if args.output.is_none() {
         return Err(RehydrationError::UserCancelled);
     }
-    if args.yes && !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
-        return Err(RehydrationError::UserCancelled);
-    }
     let manifest_path = args.manifest.as_ref().ok_or_else(|| {
         RehydrationError::ManifestParse(
             "manifest is required for independent vault binding verification".to_owned(),
         )
     })?;
-    // Verify requested manifest/document metadata before asking custody to decrypt.
-    let vault_map = load_vault_map_verified(
+    let snapshot_path = args.snapshot.as_ref().ok_or_else(|| {
+        RehydrationError::AtomicCustody(
+            "encrypted SensitiveSnapshot/session is required".to_owned(),
+        )
+    })?;
+    // Verify every artifact before asking custody to release the TokenReplace map.
+    let verified = load_custody_verified(
         &args.vault_map,
         manifest_path,
+        snapshot_path,
         args.document.as_deref(),
-        vault_passphrase,
     )?;
+    if verified.manifest.document.tenant_id != tenant_id {
+        return Err(RehydrationError::AtomicCustody(
+            "custody document is not bound to the authenticated tenant".to_owned(),
+        ));
+    }
+    if let Some(doc_id) = args.doc_id.as_deref()
+        && verified.manifest.document.document_id != doc_id
+    {
+        return Err(RehydrationError::AtomicCustody(
+            "custody document identity does not match the requested document".to_owned(),
+        ));
+    }
+    let fingerprint = verified.manifest.fingerprint.0.clone();
+    let vault_map = verified.token_replace;
 
     if let Some(entity_token) = args.entity {
         // Single entity rehydration
-        if !args.yes {
-            let confirmed = confirm_rehydration(&entity_token, false)?;
-            if !confirmed {
-                return Err(RehydrationError::UserCancelled);
-            }
+        let confirmed = confirm_rehydration("entity disclosure", false)?;
+        if !confirmed {
+            return Err(RehydrationError::UserCancelled);
         }
 
         let original = rehydrate_entity(&vault_map, &entity_token)?;
@@ -215,17 +234,15 @@ pub async fn run_rehydrate(
             timestamp,
             operation: "entity".to_owned(),
             scope: entity_token,
-            fingerprint: String::new(), // TODO: extract from manifest
+            fingerprint,
             success: true,
             error: None,
         })
-    } else if let Some(doc_id) = args.doc_id {
+    } else if let Some(_doc_id) = args.doc_id {
         // Full document rehydration
-        if !args.yes {
-            let confirmed = confirm_rehydration(&doc_id, true)?;
-            if !confirmed {
-                return Err(RehydrationError::UserCancelled);
-            }
+        let confirmed = confirm_rehydration("document disclosure", true)?;
+        if !confirmed {
+            return Err(RehydrationError::UserCancelled);
         }
 
         // For full document rehydration, we need the redacted content.
@@ -246,12 +263,18 @@ pub async fn run_export_recovery(
     binding: &PrincipalBinding,
     tenant_id: &str,
 ) -> Result<(), RehydrationError> {
+    let _ = vault_passphrase;
     if !binding.authorizes(tenant_id) {
         return Err(RehydrationError::UnauthorizedTenant);
     }
     let manifest_bytes = load_manifest(&args.manifest)?;
-    let vault_map =
-        load_vault_map_verified(&args.vault_map, &args.manifest, None, vault_passphrase)?;
+    let verified = load_custody_verified(&args.vault_map, &args.manifest, &args.snapshot, None)?;
+    if verified.manifest.document.tenant_id != tenant_id {
+        return Err(RehydrationError::AtomicCustody(
+            "custody document is not bound to the authenticated tenant".to_owned(),
+        ));
+    }
+    let vault_map = verified.token_replace;
 
     if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
         return Err(RehydrationError::UserCancelled);
@@ -279,9 +302,11 @@ pub async fn run_export_recovery(
     Ok(())
 }
 
-/// Retrieve vault passphrase from macOS Keychain (stub for now).
+/// Compatibility shim for the existing binary entry point.
+///
+/// No passphrase is returned. The actual operation obtains the Keychain or
+/// explicit development fixture provider inside `load_custody_verified`.
 pub fn get_vault_passphrase() -> Result<String, RehydrationError> {
-    // Preserve the legacy caller contract without returning custody material.
     default_vault_key_provider().map_err(|e| RehydrationError::Custody(e.to_string()))?;
     Ok(String::new())
 }
