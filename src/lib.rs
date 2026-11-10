@@ -19,7 +19,10 @@ pub mod search;
 pub use authz::{
     AuthzError, CleanDocumentRef, FolderRoot, PrincipalBinding, PrincipalRole, attach_local_doc,
 };
-pub use cli::{Cli, Commands, DoctorArgs, ExportRecoveryArgs, McpArgs, RehydrateArgs, SyncArgs};
+pub use cli::{
+    Cli, Commands, DoctorArgs, ExportRecoveryArgs, McpArgs, MigrateLegacyArgs, RehydrateArgs,
+    SyncArgs,
+};
 pub use cli_error::CliError;
 pub use config::{ConfigError, HaciendaConfig, RedactionConfig, doctor_checks, load_config};
 pub use disclosure_ledger::{
@@ -38,8 +41,8 @@ pub use mcp_server::{McpServer, ToolRegistry};
 pub use mcp_types::{Capability, Principal, PrincipalResolver, ResolutionContext, ResolverError};
 pub use redactor::{BRIDGE_CATEGORY, BridgeError, GazeRedactor, class_label};
 pub use rehydration::{
-    RehydrationAuditRecord, RehydrationError, get_vault_passphrase, log_audit, run_export_recovery,
-    run_rehydrate,
+    RehydrationAuditRecord, RehydrationError, load_vault_map_verified, log_audit,
+    migrate_legacy_vault, run_export_recovery, run_rehydrate,
 };
 pub use search::{
     SearchEngine, SearchFilter, SearchParams, SearchResult, TenantSearchEngineManager,

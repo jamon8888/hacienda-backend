@@ -4,6 +4,8 @@
 - **Date:** 2026-10-24
 - **Deciders:** owner (jamon8888) via wayfinder grilling (HITL, live)
 - **Related:** ADR-0001, ADR-0003, ADR-0004; basemind ADR-0015
+- **Implementation status:** Partial; fingerprint/storage primitives exist, but production Keychain-backed
+  vault writes, durable index generations, and restart/rebuild evidence are not complete.
 
 ## Context
 
@@ -62,3 +64,7 @@ determines chunk `byte_end` (basemind ADR-0015).
 ## Operational boundary addendum
 
 The dual-store write is reached only from an allowed local or mounted network folder after watched-root xberg MIME/OCR extraction and fail-closed Gaze processing. The encrypted vault, provenance manifest, xberg map, and `clean.md`/class-stable projection carry the same document/content/tenant/engine-era/policy binding. Folder-sync bypass, disconnected roots, and in-memory-only index state are current implementation gaps, not exceptions to this decision.
+
+Application encryption of vault restore material does not imply encryption or durability of Tantivy/LanceDB
+indexes. Index-at-rest protection is a separate deployment/release control until an index-specific,
+restart-tested implementation exists.

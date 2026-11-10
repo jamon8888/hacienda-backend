@@ -20,12 +20,24 @@ and making the TypeScript extension a recovery boundary.
 
 ## Status and current gaps
 
-**This workspace is a scaffold and is not production-compliant.** The shipped implementation has direct
-Rust MCP over stdio/HTTP, raw-capable `rehydrate` and owner-fallback paths, fixed-key/dev custody,
-stdout/`--yes` behavior, incomplete folder-sync/index durability, no authoritative token-only transcript,
-no complete egress validator, and no verified client parity. HumanDisclosure, the stateful gateway, and
-durable production index/recovery semantics remain to be implemented. These are gaps, not supported
-production behavior.
+This repository is an **active partial implementation and is not production-compliant**. The canonical
+target and the evidence-backed status of each capability live in [docs/spec.md](docs/spec.md); approved
+designs are recorded in the ADRs below. Current raw-capable recovery/rehydration, fixed-key or development
+custody, stdout/`--yes` behavior, in-memory index paths, incomplete folder-sync durability, and the absence
+of the proxy-owned transcript/gateway are implementation gaps, not supported production behavior.
+
+### MVP feature matrix
+
+| Capability | Status | Truthful claim |
+|---|---|---|
+| Gaze/xberg redaction seam | Partial | Redactor and projection primitives exist; the complete watched-root acceptance path is not claimed shipped |
+| Class-stable projection | Partial | Projection logic exists; durable per-tenant index generations and rebuilds remain incomplete |
+| Tenant authorization and tenant-aware search | Partial | Validation and tenant-aware components exist; every public operation is not yet covered end to end |
+| Vault encryption and Keychain custody | Partial | Custody/encryption seams exist; production startup and all write paths are not yet proven |
+| MCP over stdio/HTTP | Partial/noncompliant target | The current direct server is not the closed, proxy-owned production MCP gate |
+| HumanDisclosure sidecar and secure viewer | Planned | ADR-0005 Proposed; no raw MCP recovery is supported by the target contract |
+| Hacienda Gateway and local Markdown UI | Planned | ADR-0006/0007 Proposed; provider egress and workspace isolation are not shipped |
+| Durable evidence ledger and anchoring | Planned | ADR-0008 Proposed; current audit code is not a true WORM or release-complete ledger |
 
 - [Architecture overview](ARCHITECTURE.md)
 - [Glossary](GLOSSARY.md)
@@ -37,8 +49,12 @@ production behavior.
 - [ADR-0004 Class-stable projection is the only indexed form](docs/adr/0004-class-stable-projection.md)
 - [ADR-0005 Human disclosure boundary](docs/adr/0005-human-disclosure-boundary.md)
 
-The TypeScript extension is optional UX/onboarding only and must not provide recovery or be treated as a security boundary. Provider traffic must use the proposed Hacienda Gateway base-URL reverse proxy; the proposed local Markdown workspace UI is separate from provider transcripts. These components are not shipped, so the scaffold is not production-compliant.
+The TypeScript extension is optional UX/onboarding only and must not provide recovery or be treated as a security boundary. Provider traffic must use the proposed Hacienda Gateway base-URL reverse proxy; the proposed local Markdown workspace UI is separate from provider transcripts. These components are not shipped, so the repository is not production-compliant.
 
 - [ADR-0006 Provider egress gateway](docs/adr/0006-provider-egress-gateway.md)
 - [ADR-0007 Local Markdown workspace UI](docs/adr/0007-local-markdown-workspace-ui.md)
 - [ADR-0008 Evidence ledger and anchoring](docs/adr/0008-evidence-ledger-and-anchoring.md)
+
+`docs/spec.md` is the single canonical production contract. A feature is production-ready only when its
+implementation, tests, operational controls, and documentation agree; an accepted ADR or configuration
+option alone is not a readiness claim.

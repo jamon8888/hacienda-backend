@@ -626,6 +626,8 @@ pub enum ConfigError {
     MissingEngine,
     #[error("gaze engine requires gaze-assembly feature; rebuild with appropriate features")]
     MissingGazeFeature,
+    #[error("incompatible key provider for {scope}: production custody cannot use local-only KMS")]
+    IncompatibleKeyProvider { scope: String },
 }
 
 /// Load and validate `basemind.toml` from the given path.
@@ -650,7 +652,38 @@ pub fn load_config<P: AsRef<Path>>(path: P) -> Result<HaciendaConfig, ConfigErro
         });
     }
 
+    config.validate_security()?;
+
     Ok(config)
+}
+
+impl HaciendaConfig {
+    /// Validate custody combinations before any vault operation can start.
+    /// Production may not be configured with a local-only KMS. The actual
+    /// Keychain availability check is deliberately performed by the provider
+    /// constructor so configuration parsing remains side-effect free.
+    pub fn validate_security(&self) -> Result<(), ConfigError> {
+        validate_security_config(&self.encryption, self.kms.as_ref(), "global")?;
+        for tenant in &self.tenants {
+            let encryption = tenant.encryption.as_ref().unwrap_or(&self.encryption);
+            let kms = tenant.kms.as_ref().or(self.kms.as_ref());
+            validate_security_config(encryption, kms, &format!("tenant '{}'", tenant.tenant_id))?;
+        }
+        Ok(())
+    }
+}
+
+fn validate_security_config(
+    encryption: &EncryptionConfig,
+    kms: Option<&KmsConfig>,
+    scope: &str,
+) -> Result<(), ConfigError> {
+    if encryption.assurance_mode.is_production() && matches!(kms, Some(KmsConfig::Local { .. })) {
+        return Err(ConfigError::IncompatibleKeyProvider {
+            scope: scope.to_owned(),
+        });
+    }
+    Ok(())
 }
 
 /// Doctor check: verify the configuration is well-formed and required
@@ -743,7 +776,10 @@ pub fn doctor_checks(config: &HaciendaConfig) -> Vec<String> {
     }
 
     // TODO: Check for gaze model bundles (when NER is enabled via rulepack).
-    // TODO: Check macOS Keychain accessibility for vault key custody.
+    let custody_config = config.encryption_config(None);
+    if let Err(error) = crate::encryption::vault_key_provider(custody_config) {
+        errors.push(format!("vault custody unavailable: {error}"));
+    }
     // TODO: Validate policy hash matches stored fingerprint for existing documents.
 
     errors

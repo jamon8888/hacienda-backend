@@ -4,6 +4,8 @@
 - **Date:** 2026-10-24
 - **Deciders:** owner (jamon8888) with research from gaze#5
 - **Related:** ADR-0001, ADR-0002; basemind ADR-0015
+- **Implementation status:** Partial; class-stable projection logic exists, while persistent index storage,
+  generation invalidation, and deterministic rebuild evidence remain incomplete.
 
 ## Context
 
@@ -60,3 +62,7 @@ Rules:
 ## Workspace materialization clarification
 
 The class-stable projection is materialized as `clean.md` for the local workspace UI and as the only indexable form after watched-root xberg MIME/OCR extraction and Gaze redaction. The projection remains tenant- and engine-era-fingerprint-bound; raw workspace files, session tokens, and format-preserving fakes never enter `clean.md`, Tantivy, LanceDB, MCP, or provider egress.
+
+The current Tantivy path creates an in-memory index, so this ADR must not be read as a claim that durable
+or encrypted index-at-rest storage is already implemented. The target remains persistent, tenant-scoped,
+fingerprint-bound storage with explicit stale-generation rebuilds.

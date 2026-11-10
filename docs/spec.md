@@ -6,6 +6,12 @@ transcript, and a final egress validator. ADR-0005 remains **Proposed**, not shi
 implicit owner fallback, fixed-key custody, stdout/`--yes` paths, and the missing proxy controls are
 noncompliant implementation gaps.
 
+This document is the canonical production contract. It separates the approved target from the current
+repository state: **implemented** means present and covered by the current supported path, **partial**
+means a seam or primitive exists but the end-to-end production contract is not proven, and **planned**
+means the target is documented but not shipped. A configuration field, helper, or unit test is not by
+itself evidence that a production capability is implemented.
+
 ## 1. Purpose and scope
 
 Claude Code/Desktop works a folder of common office documents (basemind's 90+ format extractors):
@@ -56,18 +62,38 @@ must have an executable test or an operational gate with the stated outcome:
 7. **Tenant isolation and principal authorization.** Every read, write, rebuild, deletion, and audit/ledger
    lookup resolves an authorized principal-to-tenant binding; a payload tenant ID is never authorization, and
    cross-tenant access or mutation is rejected without sensitive error leakage.
-8. **Durable restart state.** Index generations, fingerprints, owner-vault artifacts, proxy session/transcript
-   state, disclosure metadata, and audit survive restart and resume with the same bindings; missing or partial
-   state fails closed.
+8. **Durable restart state and deterministic rebuild.** Index generations, fingerprints, owner-vault artifacts,
+   proxy session/transcript state, disclosure metadata, and audit survive restart and resume with the same
+   bindings. Changes to engine era, document, tenant binding, or projection policy make the old generation
+   unusable and trigger an explicit, observable rebuild; missing or partial state fails closed.
 9. **Truthful capability claims.** Advertised tools, resources, capabilities, and documentation match the
    implemented surface; `rehydrate`, implicit owner fallback, and any unimplemented ADR-0005 control are not
    claimed as available.
-10. **Complete metadata-only audit evidence and failure semantics.** Disclosure ledger and durable audit are
-   separate, complete, allowlisted metadata records; they retain no raw args/values/tokens/maps/snapshots/
-   manifests/queries/errors, and required audit failure blocks or marks the operation failed by operation class.
-11. **Deterministic stale-generation rebuild.** Changes to engine era, document, tenant binding, or projection
-   policy make the old generation unusable and trigger an explicit, observable, deterministic rebuild; stale
-   chunks cannot remain searchable.
+10. **Fail-closed provider egress.** All provider traffic passes through the Hacienda Gateway; captured
+   requests, responses, attachments, streams, logs, and errors contain no raw PII, and unknown providers,
+   pinning failures, sanitizer failures, or unavailable gateway state block the operation.
+11. **Independently verifiable evidence.** Durable audit and the separate disclosure ledger are metadata-only,
+   allowlisted, hash-chained, and independently verifiable/anchorable; they retain no raw args/values/tokens/
+   maps/snapshots/manifests/queries/errors/content, and required writes fail closed or mark the operation failed.
+
+### Invariant implementation status
+
+The following status is part of the contract and must be updated with implementation evidence, not merely
+when a design is approved:
+
+| Invariant | Current status | Required release evidence |
+|---|---|---|
+| 1. Gaze-exclusive, fail-closed ingress | Partial | End-to-end watched-root extraction, planted-span/class assertions, and negative bypass tests |
+| 2. No raw PII on agent-facing surfaces | Partial, with noncompliant legacy paths | Direct Claude Code/Codex stdio and Streamable HTTP scans covering success, errors, status, snippets, and transcripts |
+| 3. Proxy-owned MCP and canonical transcript | Planned | Proxy ownership, durable token-only replay/resume, and client-history suppression |
+| 4. Final egress validation | Planned | Validation of every response, error, notification, and stream fragment with fail-closed send behavior |
+| 5. Owner-only human disclosure | Planned; ADR-0005 Proposed | Independent owner/user-presence approval and secure viewer tests with no agent-readable raw destination |
+| 6. No embedded production secrets | Partial | Production startup proves Keychain custody and rejects fixed keys, passphrases, and insecure fallbacks |
+| 7. Tenant isolation and principal authorization | Partial | Positive and negative cross-tenant tests for every public read, write, rebuild, delete, status, and audit operation |
+| 8. Durable restart state and deterministic rebuild | Partial | Restart/resume plus engine/projection/tenant drift tests that reject stale data and verify explicit rebuild |
+| 9. Truthful capability claims | Partial, current direct MCP surface is not the closed production gate | Closed-manifest contract tests and documentation/advertised-capability parity |
+| 10. Fail-closed provider egress | Planned | Gateway allowlist/TLS/SSE/attachment tests and captured-request no-PII scans |
+| 11. Independently verifiable evidence | Partial | Durable audit plus separate disclosure ledger, hash-chain/signature/anchor verification, no-PII scans, and required-write failure tests |
 
 ## 4. Composition contract ([ADR-0001])
 
@@ -92,6 +118,21 @@ triggers rebuild.
 Offsets: explicit `Utf8Bytes` encoding; no post-hoc token renames once persisted (token length bakes into
 chunk `byte_end`, basemind ADR-0015).
 
+### Encryption and index-at-rest boundary
+
+The MVP storage contract distinguishes application encryption from storage durability. Vault restore
+material (the Gaze SensitiveSnapshot/session material and xberg map) is application-encrypted, with the
+production data-encryption key wrapped/custodied by macOS Keychain. Keychain custody is a release
+requirement; a passphrase, fixed key, or local fallback is not a production substitute. The encryption
+helpers and configuration seams in this repository do not, by themselves, prove that the production
+write path is wired.
+
+Tantivy/LanceDB index-at-rest protection is a separate contract. The MVP does not claim a custom encrypted
+Tantivy or LanceDB codec, nor does vault encryption implicitly protect an index. Until an index-specific
+control and restart/recovery tests are shipped, index-at-rest protection and durable index persistence are
+**partial/noncompliant** and must not be described as production-ready. A deployment must use an explicit,
+documented storage protection control and fail closed when that control is required but unavailable.
+
 ## 6. Rehydration surface ([ADR-0003], [ADR-0005])
 
 The proposed production target is a deep HumanDisclosure module with request/status/approve/deny/cancel/open-viewer,
@@ -107,6 +148,20 @@ no raw stdout and no unattended `--yes`, and it is not a security boundary. Keyc
 production; fixed passphrases/insecure fallbacks are dev/test-only. No MCP tool/resource/capability returns raw text.
 Durable operational audit and the disclosure ledger are separate metadata-only stores with allowlisted fields;
 no raw args/values/tokens/maps/snapshots/manifests/queries/errors are retained.
+
+### Closed MCP contract
+
+The production MCP surface is authenticated and closed. The core tools are `search`, `sync`, and `status`;
+`attach_local_doc`, `request_human_disclosure`, and `disclosure_status` are controlled boundary tools;
+`graph_entities` and `graph_rag` are optional, feature-gated, and tenant-scoped. `doctor` is CLI-only.
+There is no `rehydrate`, `restore`, or other raw-returning MCP tool, resource, capability, or fallback.
+
+The principal is resolved from authenticated connection/session state, never from a caller-provided identity
+or tenant field. Tenant selection is the intersection of the authenticated principal's authorized bindings
+and the operation's server-side scope; a payload tenant ID can select only among already-authorized tenants
+and can never grant authorization. Missing, ambiguous, spoofed, expired, or cross-tenant bindings fail
+closed with non-sensitive errors. This contract remains a target until the closed MCP gate and its direct
+Claude Code/Codex contract tests are shipped.
 
 ## 7. Index projection ([ADR-0004])
 

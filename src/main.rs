@@ -9,16 +9,17 @@
 
 use clap::Parser;
 use console::style;
+use dialoguer::Password;
 use hacienda_backend::{
     McpServer, TenantSearchEngineManager,
     audit::AuditLog,
     cli::{Cli, Commands, McpArgs},
     cli_error::CliError,
-    doctor_checks, get_vault_passphrase, load_config, log_audit, run_export_recovery,
-    run_rehydrate,
+    doctor_checks, load_config, log_audit, run_export_recovery, run_rehydrate,
 };
 use std::process;
 use std::sync::Arc;
+use zeroize::Zeroize;
 
 struct CliAuthContext {
     binding: hacienda_backend::authz::PrincipalBinding,
@@ -61,10 +62,13 @@ fn run_command(cli: Cli) -> Result<(), CliError> {
         Commands::Rehydrate(args) => {
             let config = load_config(&args.config)?;
             let auth = cli_auth(&config, args.tenant.as_deref())?;
-            let passphrase = get_vault_passphrase()?;
+            let provider = hacienda_backend::encryption::vault_key_provider(
+                config.encryption_config(Some(&auth.tenant_id)),
+            )
+            .map_err(|e| CliError::Other("vault custody unavailable".to_owned()))?;
             let audit = rt.block_on(run_rehydrate(
                 args,
-                &passphrase,
+                provider.as_ref(),
                 &auth.binding,
                 &auth.tenant_id,
             ))?;
@@ -103,13 +107,55 @@ fn run_command(cli: Cli) -> Result<(), CliError> {
         Commands::ExportRecovery(args) => {
             let config = load_config(&args.config)?;
             let auth = cli_auth(&config, args.tenant.as_deref())?;
-            let passphrase = get_vault_passphrase()?;
+            let provider = hacienda_backend::encryption::vault_key_provider(
+                config.encryption_config(Some(&auth.tenant_id)),
+            )
+            .map_err(|_| CliError::Other("vault custody unavailable".to_owned()))?;
             rt.block_on(run_export_recovery(
                 args,
-                &passphrase,
+                provider.as_ref(),
                 &auth.binding,
                 &auth.tenant_id,
             ))?;
+        }
+        Commands::MigrateLegacy(args) => {
+            let config = load_config(&args.config)?;
+            let auth = cli_auth(&config, args.tenant.as_deref())?;
+            let provider = hacienda_backend::encryption::vault_key_provider(
+                config.encryption_config(Some(&auth.tenant_id)),
+            )
+            .map_err(|_| CliError::Other("vault custody unavailable".to_owned()))?;
+            if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+                return Err(CliError::Other(
+                    "legacy migration requires an interactive owner terminal".to_owned(),
+                ));
+            }
+            let mut secret = Password::new()
+                .with_prompt("One-time legacy vault secret")
+                .interact()
+                .map_err(|_| CliError::Other("legacy migration cancelled".to_owned()))?;
+            let confirmed = match dialoguer::Confirm::new()
+                .with_prompt("Write the verified migrated vault and retain the legacy copy?")
+                .default(false)
+                .interact()
+            {
+                Ok(value) => value,
+                Err(_) => {
+                    secret.zeroize();
+                    return Err(CliError::Other("legacy migration cancelled".to_owned()));
+                }
+            };
+            let migration = hacienda_backend::rehydration::migrate_legacy_vault(
+                &args.legacy_vault,
+                &args.manifest,
+                &args.output,
+                &secret,
+                provider.as_ref(),
+                confirmed,
+            );
+            secret.zeroize();
+            let audit = migration?;
+            log_audit(&audit)?;
         }
         Commands::Sync(args) => {
             let config = load_config(&args.config)?;

@@ -5,8 +5,9 @@ use anyhow::{Context, Result};
 
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
+use std::fmt;
 use std::path::Path;
-use zeroize::{Zeroize, ZeroizeOnDrop};
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 use crate::config::EncryptionConfig;
 
@@ -14,33 +15,77 @@ use crate::config::EncryptionConfig;
 pub const VAULT_KEYCHAIN_SERVICE: &str = "hacienda-backend-vault";
 pub const VAULT_KEYCHAIN_ACCOUNT: &str = "vault-key-v1";
 
-/// Custody seam for vault encryption. Implementations must never expose key material in logs.
+/// Custody seam for vault encryption.
+///
+/// Implementations keep custody key bytes private. Callers only receive an
+/// application key wrapped in a non-secret reference, or a zeroizing
+/// [`MasterKey`] after an authorized unwrap.
 pub trait VaultKeyProvider: Send + Sync {
-    fn key(&self) -> Result<[u8; 32]>;
+    fn wrap_key(&self, key: &[u8; 32]) -> Result<WrappedKey>;
+    fn unwrap_key(&self, wrapped: &WrappedKey) -> Result<MasterKey>;
+    fn ensure_key(&self) -> Result<()>;
+    fn create_key(&self) -> Result<()>;
+    fn rotate_key(&self) -> Result<()>;
+    fn remove_key(&self) -> Result<()>;
+    fn provider_name(&self) -> &'static str;
 }
 
 /// Explicit development/test fixture. Production constructors reject this provider.
+#[derive(Zeroize, ZeroizeOnDrop)]
 pub struct FixtureVaultKeyProvider(pub [u8; 32]);
 impl VaultKeyProvider for FixtureVaultKeyProvider {
-    fn key(&self) -> Result<[u8; 32]> {
-        Ok(self.0)
+    fn wrap_key(&self, key: &[u8; 32]) -> Result<WrappedKey> {
+        wrap_key_with_custody_key(&self.0, key, "fixture")
+    }
+
+    fn unwrap_key(&self, wrapped: &WrappedKey) -> Result<MasterKey> {
+        unwrap_key_with_custody_key(&self.0, wrapped)
+    }
+
+    fn ensure_key(&self) -> Result<()> {
+        Ok(())
+    }
+
+    fn create_key(&self) -> Result<()> {
+        Err(anyhow::anyhow!(
+            "fixture custody cannot create an injected key"
+        ))
+    }
+
+    fn rotate_key(&self) -> Result<()> {
+        Err(anyhow::anyhow!(
+            "fixture custody cannot rotate an immutable key"
+        ))
+    }
+
+    fn remove_key(&self) -> Result<()> {
+        Err(anyhow::anyhow!(
+            "fixture custody cannot remove an injected key"
+        ))
+    }
+
+    fn provider_name(&self) -> &'static str {
+        "fixture"
     }
 }
 
 /// macOS Keychain-backed vault custody.
 pub struct KeychainVaultKeyProvider;
 impl VaultKeyProvider for KeychainVaultKeyProvider {
-    fn key(&self) -> Result<[u8; 32]> {
+    fn wrap_key(&self, key: &[u8; 32]) -> Result<WrappedKey> {
+        let custody_key = self.read_key()?;
+        wrap_key_with_custody_key(&custody_key, key, "keychain")
+    }
+
+    fn unwrap_key(&self, wrapped: &WrappedKey) -> Result<MasterKey> {
+        let custody_key = self.read_key()?;
+        unwrap_key_with_custody_key(&custody_key, wrapped)
+    }
+
+    fn ensure_key(&self) -> Result<()> {
         #[cfg(target_os = "macos")]
         {
-            use security_framework::passwords::get_generic_password;
-            let bytes = get_generic_password(VAULT_KEYCHAIN_SERVICE, VAULT_KEYCHAIN_ACCOUNT)
-                .context("vault Keychain item is unavailable")?;
-            let key: [u8; 32] = bytes
-                .as_slice()
-                .try_into()
-                .map_err(|_| anyhow::anyhow!("vault Keychain item has invalid length"))?;
-            Ok(key)
+            self.read_key().map(|_| ())
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -49,6 +94,143 @@ impl VaultKeyProvider for KeychainVaultKeyProvider {
             ))
         }
     }
+
+    fn create_key(&self) -> Result<()> {
+        #[cfg(target_os = "macos")]
+        {
+            let mut key = Zeroizing::new([0u8; 32]);
+            rand::rng().fill_bytes(key.as_mut());
+            self.set_key(&key)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            Err(anyhow::anyhow!(
+                "production vault custody requires macOS Keychain"
+            ))
+        }
+    }
+
+    fn rotate_key(&self) -> Result<()> {
+        #[cfg(target_os = "macos")]
+        {
+            let mut key = Zeroizing::new([0u8; 32]);
+            rand::rng().fill_bytes(key.as_mut());
+            self.set_key(&key)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            Err(anyhow::anyhow!(
+                "production vault custody requires macOS Keychain"
+            ))
+        }
+    }
+
+    fn remove_key(&self) -> Result<()> {
+        #[cfg(target_os = "macos")]
+        {
+            use security_framework::passwords::delete_generic_password;
+            delete_generic_password(VAULT_KEYCHAIN_SERVICE, VAULT_KEYCHAIN_ACCOUNT)
+                .context("remove vault Keychain item")
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            Err(anyhow::anyhow!(
+                "production vault custody requires macOS Keychain"
+            ))
+        }
+    }
+
+    fn provider_name(&self) -> &'static str {
+        "keychain"
+    }
+}
+
+impl KeychainVaultKeyProvider {
+    #[cfg(target_os = "macos")]
+    fn read_key(&self) -> Result<Zeroizing<[u8; 32]>> {
+        use security_framework::passwords::get_generic_password;
+        let mut bytes = get_generic_password(VAULT_KEYCHAIN_SERVICE, VAULT_KEYCHAIN_ACCOUNT)
+            .context("vault Keychain item is unavailable")?;
+        let key = bytes
+            .as_slice()
+            .try_into()
+            .map(Zeroizing::new)
+            .map_err(|_| anyhow::anyhow!("vault Keychain item has invalid length"));
+        bytes.zeroize();
+        key
+    }
+
+    #[cfg(target_os = "macos")]
+    fn set_key(&self, key: &[u8; 32]) -> Result<()> {
+        use security_framework::passwords::set_generic_password;
+        set_generic_password(VAULT_KEYCHAIN_SERVICE, VAULT_KEYCHAIN_ACCOUNT, key)
+            .context("store vault Keychain item")
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn read_key(&self) -> Result<Zeroizing<[u8; 32]>> {
+        Err(anyhow::anyhow!(
+            "production vault custody requires macOS Keychain"
+        ))
+    }
+}
+
+fn wrap_key_with_custody_key(
+    custody_key: &[u8; 32],
+    key: &[u8; 32],
+    custody: &str,
+) -> Result<WrappedKey> {
+    use aes_gcm::aead::{Aead, Payload};
+    use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
+
+    let cipher = Aes256Gcm::new(custody_key.into());
+    let nonce_bytes: [u8; 12] = rand::random();
+    let mut ciphertext = cipher
+        .encrypt(
+            Nonce::from_slice(&nonce_bytes),
+            Payload {
+                msg: key,
+                aad: KEY_WRAP_AAD,
+            },
+        )
+        .map_err(|_| anyhow::anyhow!("custody key wrapping failed"))?;
+    let mut blob = nonce_bytes.to_vec();
+    blob.append(&mut ciphertext);
+    Ok(WrappedKey {
+        ciphertext: blob,
+        provider: CUSTODY_WRAP_PROVIDER.to_owned(),
+        key_id: VAULT_KEYCHAIN_ACCOUNT.to_owned(),
+        metadata: serde_json::json!({"custody": custody}),
+    })
+}
+
+fn unwrap_key_with_custody_key(custody_key: &[u8; 32], wrapped: &WrappedKey) -> Result<MasterKey> {
+    use aes_gcm::aead::{Aead, Payload};
+    use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
+
+    anyhow::ensure!(
+        wrapped.provider == CUSTODY_WRAP_PROVIDER
+            && wrapped.key_id == VAULT_KEYCHAIN_ACCOUNT
+            && wrapped.ciphertext.len() >= 12 + 16,
+        "wrapped key reference is invalid"
+    );
+    let (nonce, ct) = wrapped.ciphertext.split_at(12);
+    let cipher = Aes256Gcm::new(custody_key.into());
+    let mut plaintext = cipher
+        .decrypt(
+            Nonce::from_slice(nonce),
+            Payload {
+                msg: ct,
+                aad: KEY_WRAP_AAD,
+            },
+        )
+        .map_err(|_| anyhow::anyhow!("custody key unwrapping failed"))?;
+    let key: [u8; 32] = plaintext
+        .as_slice()
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("unwrapped key has invalid length"));
+    plaintext.zeroize();
+    key.map(MasterKey::from_bytes)
 }
 
 /// Select custody from validated configuration. Production never accepts a
@@ -62,20 +244,12 @@ pub fn vault_key_provider(config: &EncryptionConfig) -> Result<Box<dyn VaultKeyP
     select_vault_key_provider(mode)
 }
 
-/// Backwards-compatible custody entry point for CLI paths that have not yet
-/// been given a loaded config. The environment is an explicit development/test
-/// seam only; production still defaults to fail-closed Keychain custody.
-pub fn default_vault_key_provider() -> Result<Box<dyn VaultKeyProvider>> {
-    let mode = std::env::var("HACIENDA_ASSURANCE_MODE").unwrap_or_else(|_| "production".to_owned());
-    select_vault_key_provider(&mode)
-}
-
 fn select_vault_key_provider(mode: &str) -> Result<Box<dyn VaultKeyProvider>> {
     match mode {
         "production" => {
             let provider = KeychainVaultKeyProvider;
             provider
-                .key()
+                .ensure_key()
                 .context("production vault Keychain custody unavailable")?;
             Ok(Box::new(provider))
         }
@@ -92,14 +266,32 @@ fn select_vault_key_provider(mode: &str) -> Result<Box<dyn VaultKeyProvider>> {
     }
 }
 
-/// Authenticated vault blob bound to fingerprint and document identity.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Versioned, application-encrypted vault blob bound to fingerprint and
+/// document identity. The application key is never persisted in plaintext;
+/// only its custody-wrapped reference is persisted.
+#[derive(Clone, Serialize, Deserialize)]
 pub struct VaultBlob {
+    pub version: u8,
     pub algorithm: String,
     pub nonce: Vec<u8>,
     pub ciphertext: Vec<u8>,
+    pub wrapped_key: WrappedKey,
     pub fingerprint: String,
     pub document_binding: String,
+}
+
+impl fmt::Debug for VaultBlob {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("VaultBlob")
+            .field("version", &self.version)
+            .field("algorithm", &self.algorithm)
+            .field("nonce_len", &self.nonce.len())
+            .field("ciphertext_len", &self.ciphertext.len())
+            .field("wrapped_key", &self.wrapped_key)
+            .field("fingerprint", &self.fingerprint)
+            .field("document_binding", &self.document_binding)
+            .finish()
+    }
 }
 
 pub fn encrypt_vault_blob(
@@ -112,7 +304,9 @@ pub fn encrypt_vault_blob(
         Aes256Gcm, KeyInit, Nonce,
         aead::{Aead, Payload},
     };
-    let cipher = Aes256Gcm::new((&provider.key()?).into());
+    let application_key = MasterKey::generate()?;
+    let wrapped_key = provider.wrap_key(application_key.as_bytes())?;
+    let cipher = Aes256Gcm::new(application_key.as_bytes().into());
     let nonce_bytes: [u8; 12] = rand::random();
     let aad = format!("hacienda-vault-v1\\0{fingerprint}\\0{document_binding}");
     let ciphertext = cipher
@@ -125,9 +319,11 @@ pub fn encrypt_vault_blob(
         )
         .map_err(|_| anyhow::anyhow!("vault encryption failed"))?;
     serde_json::to_vec(&VaultBlob {
+        version: 2,
         algorithm: "aes256gcm".into(),
         nonce: nonce_bytes.to_vec(),
         ciphertext,
+        wrapped_key,
         fingerprint: fingerprint.into(),
         document_binding: document_binding.into(),
     })
@@ -146,13 +342,15 @@ pub fn decrypt_vault_blob(
     };
     let envelope: VaultBlob = serde_json::from_slice(blob).context("parse vault blob")?;
     if envelope.algorithm != "aes256gcm"
+        || envelope.version != 2
         || envelope.fingerprint != expected_fingerprint
         || envelope.document_binding != document_binding
         || envelope.nonce.len() != 12
     {
         return Err(anyhow::anyhow!("vault binding mismatch"));
     }
-    let cipher = Aes256Gcm::new((&provider.key()?).into());
+    let application_key = provider.unwrap_key(&envelope.wrapped_key)?;
+    let cipher = Aes256Gcm::new(application_key.as_bytes().into());
     let aad = format!("hacienda-vault-v1\\0{expected_fingerprint}\\0{document_binding}");
     cipher
         .decrypt(
@@ -165,7 +363,7 @@ pub fn decrypt_vault_blob(
         .map_err(|_| anyhow::anyhow!("vault authentication failed"))
 }
 
-/// Master key for encryption (wrapped by KMS or derived from passphrase).
+/// Master key for application encryption.
 #[derive(Zeroize, ZeroizeOnDrop)]
 pub struct MasterKey {
     key: [u8; 32], // 256-bit key for AES-256-GCM / ChaCha20-Poly1305
@@ -260,61 +458,6 @@ fn unwrap_key_with_master(master: &MasterKey, wrapped: &WrappedKey) -> Result<[u
         .map_err(|_| anyhow::anyhow!("unwrapped key has invalid length"))
 }
 
-/// Wrap a 32-byte key with the vault custody key (AES-256-GCM envelope).
-fn wrap_key_with_custody(provider: &dyn VaultKeyProvider, key: &[u8; 32]) -> Result<WrappedKey> {
-    use aes_gcm::aead::{Aead, Payload};
-    use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
-
-    let cipher = Aes256Gcm::new((&provider.key()?).into());
-    let nonce_bytes: [u8; 12] = rand::random();
-    let mut ciphertext = cipher
-        .encrypt(
-            Nonce::from_slice(&nonce_bytes),
-            Payload {
-                msg: key,
-                aad: KEY_WRAP_AAD,
-            },
-        )
-        .map_err(|_| anyhow::anyhow!("custody key wrapping failed"))?;
-    let mut blob = nonce_bytes.to_vec();
-    blob.append(&mut ciphertext);
-    Ok(WrappedKey {
-        ciphertext: blob,
-        provider: CUSTODY_WRAP_PROVIDER.to_string(),
-        key_id: VAULT_KEYCHAIN_ACCOUNT.to_string(),
-        metadata: serde_json::json!({}),
-    })
-}
-
-/// Unwrap a 32-byte key wrapped with the vault custody key.
-fn unwrap_key_with_custody(
-    provider: &dyn VaultKeyProvider,
-    wrapped: &WrappedKey,
-) -> Result<[u8; 32]> {
-    use aes_gcm::aead::{Aead, Payload};
-    use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
-
-    anyhow::ensure!(
-        wrapped.ciphertext.len() >= 12 + 16,
-        "wrapped key is too short"
-    );
-    let (nonce, ct) = wrapped.ciphertext.split_at(12);
-    let cipher = Aes256Gcm::new((&provider.key()?).into());
-    let plaintext = cipher
-        .decrypt(
-            Nonce::from_slice(nonce),
-            Payload {
-                msg: ct,
-                aad: KEY_WRAP_AAD,
-            },
-        )
-        .map_err(|_| anyhow::anyhow!("custody key unwrapping failed"))?;
-    plaintext
-        .as_slice()
-        .try_into()
-        .map_err(|_| anyhow::anyhow!("unwrapped key has invalid length"))
-}
-
 /// Atomically create a key file with owner-only permissions and write `data`.
 async fn write_key_file(path: &Path, data: &[u8]) -> Result<()> {
     #[cfg(unix)]
@@ -340,7 +483,7 @@ async fn write_key_file(path: &Path, data: &[u8]) -> Result<()> {
 }
 
 /// A master key wrapped (encrypted) by the KMS.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct WrappedKey {
     /// The encrypted key material.
     pub ciphertext: Vec<u8>,
@@ -351,6 +494,17 @@ pub struct WrappedKey {
     /// Additional metadata.
     #[serde(default)]
     pub metadata: serde_json::Value,
+}
+
+impl fmt::Debug for WrappedKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("WrappedKey")
+            .field("ciphertext", &"[redacted]")
+            .field("provider", &self.provider)
+            .field("key_id", &self.key_id)
+            .field("metadata", &self.metadata)
+            .finish()
+    }
 }
 
 impl TryFrom<Vec<u8>> for WrappedKey {
@@ -410,6 +564,11 @@ impl EncryptionEngine {
         config: EncryptionConfig,
         kms_config: Option<crate::config::KmsConfig>,
     ) -> Result<Self> {
+        anyhow::ensure!(
+            !(config.assurance_mode.is_production()
+                && matches!(&kms_config, Some(crate::config::KmsConfig::Local { .. }))),
+            "production custody cannot use local-only KMS"
+        );
         // Resolve custody from the validated config rather than silently using
         // HACIENDA_ASSURANCE_MODE when an application supplies configuration.
         // This also preserves production's fail-closed Keychain requirement.
@@ -472,7 +631,7 @@ impl EncryptionEngine {
             return master_key.wrap(kms.as_ref()).await;
         }
         if let Some(provider) = &self.vault_provider {
-            return wrap_key_with_custody(provider.as_ref(), master_key.as_bytes());
+            return provider.wrap_key(master_key.as_bytes());
         }
         Err(anyhow::anyhow!(
             "no key source (KMS or vault custody) available to wrap the master key"
@@ -487,8 +646,7 @@ impl EncryptionEngine {
                     "wrapped master key uses vault custody but no custody provider is configured"
                 )
             })?;
-            let key = unwrap_key_with_custody(provider.as_ref(), wrapped)?;
-            return Ok(MasterKey::from_bytes(key));
+            return provider.unwrap_key(wrapped);
         }
         let kms = self.kms_client.as_ref().ok_or_else(|| {
             anyhow::anyhow!("wrapped key file exists but no KMS client is configured to unwrap it")
@@ -861,5 +1019,52 @@ impl KmsClient for HashiCorpVaultClient {
 
     fn key_id(&self) -> &str {
         &self.key_name
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fixture_provider() -> FixtureVaultKeyProvider {
+        FixtureVaultKeyProvider([0x42; 32])
+    }
+
+    #[test]
+    fn vault_blob_uses_application_key_and_custody_reference() {
+        let provider = fixture_provider();
+        let blob = encrypt_vault_blob(b"owner-only value", "fp", "doc", &provider)
+            .expect("fixture encryption must succeed");
+        let envelope: VaultBlob = serde_json::from_slice(&blob).expect("valid envelope");
+
+        assert_eq!(envelope.version, 2);
+        assert_eq!(envelope.wrapped_key.provider, CUSTODY_WRAP_PROVIDER);
+        assert_eq!(envelope.wrapped_key.key_id, VAULT_KEYCHAIN_ACCOUNT);
+        assert_ne!(envelope.ciphertext, b"owner-only value");
+        assert_eq!(
+            decrypt_vault_blob(&blob, "fp", "doc", &provider).expect("fixture decrypt"),
+            b"owner-only value"
+        );
+    }
+
+    #[test]
+    fn custody_failure_does_not_decrypt_application_payload() {
+        let provider = fixture_provider();
+        let wrong_provider = FixtureVaultKeyProvider([0x24; 32]);
+        let blob = encrypt_vault_blob(b"sensitive", "fp", "doc", &provider).expect("encrypt");
+        let error = decrypt_vault_blob(&blob, "fp", "doc", &wrong_provider)
+            .expect_err("wrong custody must fail closed");
+        assert!(!error.to_string().contains("sensitive"));
+    }
+
+    #[test]
+    fn wrapped_key_debug_redacts_ciphertext() {
+        let provider = fixture_provider();
+        let wrapped = provider
+            .wrap_key(&[0x99; 32])
+            .expect("fixture wrapping must succeed");
+        let rendered = format!("{wrapped:?}");
+        assert!(rendered.contains("redacted"));
+        assert!(!rendered.contains("99"));
     }
 }

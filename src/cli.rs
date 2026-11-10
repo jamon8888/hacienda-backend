@@ -25,6 +25,9 @@ pub enum Commands {
     /// Export encrypted recovery bundle for offline restore.
     ExportRecovery(ExportRecoveryArgs),
 
+    /// Migrate a legacy prototype vault after owner confirmation.
+    MigrateLegacy(MigrateLegacyArgs),
+
     /// Sync document folder (watcher or manual refresh).
     Sync(SyncArgs),
 
@@ -102,6 +105,26 @@ pub struct ExportRecoveryArgs {
     /// Path to the gaze manifest file.
     #[arg(long, short = 'm', required = true)]
     pub manifest: PathBuf,
+}
+
+/// Arguments for the owner-approved legacy vault migration.
+#[derive(Args, Debug)]
+pub struct MigrateLegacyArgs {
+    /// Hacienda configuration containing the authenticated principal binding.
+    #[arg(long, short = 'c', default_value = "basemind.toml")]
+    pub config: PathBuf,
+    /// Authorized tenant; omitted only for a single-bound principal.
+    #[arg(long)]
+    pub tenant: Option<String>,
+    /// Legacy XPII vault file.
+    #[arg(long, required = true)]
+    pub legacy_vault: PathBuf,
+    /// Manifest used to bind the migrated vault.
+    #[arg(long, short = 'm', required = true)]
+    pub manifest: PathBuf,
+    /// Destination for the application-encrypted vault.
+    #[arg(long, short = 'o', required = true)]
+    pub output: PathBuf,
 }
 
 /// Arguments for the sync command.

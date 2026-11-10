@@ -8,6 +8,7 @@
 
 use crate::EngineEraFingerprint;
 use crate::config::HaciendaConfig;
+use crate::dual_store::write_dual_store;
 use blake3;
 use console;
 use crossbeam_channel::{Receiver, Sender, bounded};
@@ -17,7 +18,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::task::JoinHandle;
-use xberg::RedactionConfig;
+use xberg::{ExtractedDocument, RedactionConfig};
 
 /// Sync event from the watcher or manual trigger.
 #[derive(Debug, Clone)]
@@ -30,6 +31,23 @@ pub enum SyncEvent {
     FullRebuild { reason: String },
     /// Shutdown signal.
     Shutdown,
+}
+
+fn sync_redaction_config() -> RedactionConfig {
+    RedactionConfig {
+        categories: std::collections::HashSet::from([xberg::PiiCategory::Custom(
+            crate::BRIDGE_CATEGORY.to_owned(),
+        )]),
+        strategy: xberg::RedactionStrategy::TokenReplace,
+        ner: None,
+        preserve_offsets: true,
+        custom_terms: Vec::new(),
+        custom_patterns: Vec::new(),
+        findings: Vec::new(),
+        min_score: None,
+        findings_path: None,
+        findings_offset_encoding: xberg::RedactionOffsetEncoding::Utf8Bytes,
+    }
 }
 
 /// Document record in the sync index.
@@ -46,6 +64,7 @@ pub struct IndexedDocument {
 pub struct FolderSync {
     root: PathBuf,
     config: HaciendaConfig,
+    tenant_id: String,
     watcher: Option<RecommendedWatcher>,
     event_tx: Sender<SyncEvent>,
     event_rx: Receiver<SyncEvent>,
@@ -55,10 +74,17 @@ pub struct FolderSync {
 impl FolderSync {
     /// Create a new folder sync engine.
     pub fn new(root: PathBuf, config: HaciendaConfig) -> Self {
+        let tenant_id = config.default_tenant.clone();
+        Self::new_scoped(root, config, tenant_id)
+    }
+
+    /// Create a sync engine bound to one already-authorized tenant.
+    pub fn new_scoped(root: PathBuf, config: HaciendaConfig, tenant_id: String) -> Self {
         let (event_tx, event_rx) = bounded(1024);
         Self {
             root,
             config,
+            tenant_id,
             watcher: None,
             event_tx,
             event_rx,
@@ -91,9 +117,10 @@ impl FolderSync {
         let event_rx = self.event_rx;
         let config = self.config.clone();
         let root = self.root.clone();
+        let tenant_id = self.tenant_id.clone();
 
         let handle = tokio::spawn(async move {
-            Self::sync_loop(root, config, indexed, event_rx).await;
+            Self::sync_loop(root, config, tenant_id, indexed, event_rx).await;
         });
 
         Ok(handle)
@@ -120,13 +147,14 @@ impl FolderSync {
     async fn sync_loop(
         root: PathBuf,
         config: HaciendaConfig,
+        tenant_id: String,
         indexed: Arc<tokio::sync::RwLock<HashMap<String, IndexedDocument>>>,
         event_rx: Receiver<SyncEvent>,
     ) {
         while let Ok(event) = event_rx.recv() {
             match event {
                 SyncEvent::FileChanged { path } => {
-                    Self::handle_file_changed(&root, &config, &indexed, path).await;
+                    Self::handle_file_changed(&root, &config, &tenant_id, &indexed, path).await;
                 }
                 SyncEvent::FileDeleted { path } => {
                     Self::handle_file_deleted(&root, &indexed, path).await;
@@ -137,7 +165,7 @@ impl FolderSync {
                         console::style("▶").blue().bold(),
                         reason
                     );
-                    Self::full_rebuild(&root, &config, &indexed).await;
+                    Self::full_rebuild(&root, &config, &tenant_id, &indexed).await;
                 }
                 SyncEvent::Shutdown => break,
             }
@@ -147,7 +175,8 @@ impl FolderSync {
     /// Handle a file change: compute content hash, check fingerprint, re-index incrementally.
     async fn handle_file_changed(
         root: &Path,
-        _config: &HaciendaConfig,
+        config: &HaciendaConfig,
+        tenant_id: &str,
         indexed: &Arc<tokio::sync::RwLock<HashMap<String, IndexedDocument>>>,
         path: PathBuf,
     ) {
@@ -192,30 +221,36 @@ impl FolderSync {
             }
         }
 
-        // Extract content for processing
-        let _text = String::from_utf8_lossy(&content).to_string();
-
-        // Run dual-store write (this does gaze detection + redaction)
-        // In production, this would use the engine from config
-        // For now, we just update the index record
-        let fingerprint = EngineEraFingerprint::compute(
-            "gaze-assembly",
-            crate::TOKEN_GRAMMAR_VERSION,
-            &RedactionConfig {
-                categories: std::collections::HashSet::from([xberg::PiiCategory::Custom(
-                    crate::BRIDGE_CATEGORY.to_owned(),
-                )]),
-                strategy: xberg::RedactionStrategy::TokenReplace,
-                ner: None,
-                preserve_offsets: true,
-                custom_terms: Vec::new(),
-                custom_patterns: Vec::new(),
-                findings: Vec::new(),
-                min_score: None,
-                findings_path: None,
-                findings_offset_encoding: xberg::RedactionOffsetEncoding::Utf8Bytes,
-            },
-        );
+        let custody = match crate::encryption::vault_key_provider(config.encryption_config(None)) {
+            Ok(provider) => provider,
+            Err(_) => return,
+        };
+        let engine = match crate::GazeEngine::core_floor() {
+            Ok(engine) => engine,
+            Err(_) => return,
+        };
+        let mut document = ExtractedDocument::default();
+        document.content = String::from_utf8_lossy(&content).to_string();
+        let redaction_config = sync_redaction_config();
+        let output = match write_dual_store(
+            &engine,
+            &mut document,
+            &redaction_config,
+            &config.redaction.one_way,
+            custody.as_ref(),
+        )
+        .await
+        {
+            Ok(output) => output,
+            Err(_) => return,
+        };
+        let fingerprint = output.fingerprint.clone();
+        if persist_dual_store(config, tenant_id, &doc_id, &output)
+            .await
+            .is_err()
+        {
+            return;
+        }
 
         let mut idx = indexed.write().await;
         idx.insert(
@@ -252,14 +287,16 @@ impl FolderSync {
     /// Full rebuild: re-process all files under root.
     async fn full_rebuild(
         root: &Path,
-        _config: &HaciendaConfig,
+        config: &HaciendaConfig,
+        tenant_id: &str,
         indexed: &Arc<tokio::sync::RwLock<HashMap<String, IndexedDocument>>>,
     ) {
-        let mut idx = indexed.write().await;
-        idx.clear();
+        indexed.write().await.clear();
 
-        let mut entries = tokio::fs::read_dir(root).await.expect("read dir");
-        while let Some(entry) = entries.next_entry().await.expect("next entry") {
+        let Ok(mut entries) = tokio::fs::read_dir(root).await else {
+            return;
+        };
+        while let Ok(Some(entry)) = entries.next_entry().await {
             let path = entry.path();
             if path.is_file()
                 && !path
@@ -267,50 +304,15 @@ impl FolderSync {
                     .map(|n| n.to_string_lossy().starts_with('.'))
                     .unwrap_or(false)
             {
-                let content = tokio::fs::read(&path).await.expect("read file");
-                let content_hash = blake3::hash(&content).to_hex().to_string();
-                let doc_id = path
-                    .strip_prefix(root)
-                    .unwrap()
-                    .to_string_lossy()
-                    .to_string();
-
-                let fingerprint = EngineEraFingerprint::compute(
-                    "gaze-assembly",
-                    crate::TOKEN_GRAMMAR_VERSION,
-                    &RedactionConfig {
-                        categories: std::collections::HashSet::from([xberg::PiiCategory::Custom(
-                            crate::BRIDGE_CATEGORY.to_owned(),
-                        )]),
-                        strategy: xberg::RedactionStrategy::TokenReplace,
-                        ner: None,
-                        preserve_offsets: true,
-                        custom_terms: Vec::new(),
-                        custom_patterns: Vec::new(),
-                        findings: Vec::new(),
-                        min_score: None,
-                        findings_path: None,
-                        findings_offset_encoding: xberg::RedactionOffsetEncoding::Utf8Bytes,
-                    },
-                );
-
-                idx.insert(
-                    doc_id.clone(),
-                    IndexedDocument {
-                        doc_id,
-                        path,
-                        fingerprint,
-                        content_hash,
-                        last_modified: std::time::SystemTime::now(),
-                    },
-                );
+                Self::handle_file_changed(root, config, tenant_id, indexed, path).await;
             }
         }
 
+        let count = indexed.read().await.len();
         eprintln!(
             "{} Full rebuild complete: {} documents",
             console::style("✓").green(),
-            idx.len()
+            count
         );
     }
 
@@ -362,9 +364,14 @@ pub async fn run_manual_refresh_scoped(
     let _tenant = config
         .get_tenant(tenant_id)
         .ok_or_else(|| crate::CliError::Other("tenant unavailable".into()))?;
+    // Custody is a startup prerequisite for every production sync path. The
+    // current index implementation is not allowed to process a raw file when
+    // the owner-vault provider cannot be opened.
+    crate::encryption::vault_key_provider(config.encryption_config(Some(tenant_id)))
+        .map_err(|_| crate::CliError::Other("vault custody unavailable".into()))?;
     let mut all = Vec::new();
     for root in roots {
-        let sync = FolderSync::new(root.clone(), config.clone());
+        let sync = FolderSync::new_scoped(root.clone(), config.clone(), tenant_id.to_owned());
         if full {
             sync.manual_refresh().await;
         } else {
@@ -375,11 +382,44 @@ pub async fn run_manual_refresh_scoped(
     Ok(all)
 }
 
+async fn persist_dual_store(
+    config: &HaciendaConfig,
+    tenant_id: &str,
+    doc_id: &str,
+    output: &crate::DualStoreOutput,
+) -> Result<(), std::io::Error> {
+    let directory = config.vault_dir(Some(tenant_id));
+    tokio::fs::create_dir_all(&directory).await?;
+    let artifact_id = blake3::hash(doc_id.as_bytes()).to_hex().to_string();
+    let vault_path = directory.join(format!("{artifact_id}.vault"));
+    let manifest_path = directory.join(format!("{artifact_id}.manifest"));
+    let vault_tmp = directory.join(format!(".{artifact_id}.vault.tmp-{}", uuid::Uuid::new_v4()));
+    let manifest_tmp = directory.join(format!(
+        ".{artifact_id}.manifest.tmp-{}",
+        uuid::Uuid::new_v4()
+    ));
+
+    let write_result = async {
+        tokio::fs::write(&vault_tmp, &output.vault_map).await?;
+        tokio::fs::write(&manifest_tmp, &output.gaze_manifest).await?;
+        tokio::fs::rename(&vault_tmp, &vault_path).await?;
+        tokio::fs::rename(&manifest_tmp, &manifest_path).await
+    }
+    .await;
+    if write_result.is_err() {
+        let _ = tokio::fs::remove_file(&vault_tmp).await;
+        let _ = tokio::fs::remove_file(&manifest_tmp).await;
+    }
+    write_result
+}
+
 pub async fn run_manual_refresh(
     config_path: &std::path::Path,
     full: bool,
 ) -> Result<Vec<IndexedDocument>, crate::CliError> {
     let config = crate::load_config(config_path)?;
+    crate::encryption::vault_key_provider(config.encryption_config(None))
+        .map_err(|_| crate::CliError::Other("vault custody unavailable".into()))?;
     let sync = FolderSync::new(std::env::current_dir()?, config);
 
     // Trigger manual refresh (one-shot, no watcher needed)

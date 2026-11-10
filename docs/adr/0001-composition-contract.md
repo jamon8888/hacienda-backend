@@ -4,6 +4,8 @@
 - **Date:** 2026-10-24
 - **Deciders:** owner (jamon8888) via wayfinder grilling, on research from gaze#2 + gaze#3
 - **Related:** ADR-0002, ADR-0004; basemind ADR-0015 (bounded document extraction)
+- **Implementation status:** Partial; the redactor seam and findings conversion exist, but the complete
+  watched-root, fail-closed corpus gate is not claimed shipped.
 
 ## Context
 

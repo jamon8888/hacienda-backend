@@ -4,6 +4,8 @@
 - **Date:** 2026-10-24
 - **Deciders:** owner (jamon8888) via wayfinder grilling (HITL, live)
 - **Related:** ADR-0002, ADR-0004, ADR-0005
+- **Implementation status:** Target boundary is authoritative; the proxy-owned MCP, final egress validator,
+  and HumanDisclosure sidecar/viewer are not shipped. Current raw-capable recovery paths remain noncompliant.
 
 ## Context
 

@@ -3,7 +3,7 @@
 //! One detection pass produces both stores (ADR-0002). The fingerprint
 //! `engine_id × token_grammar_version × redaction_config` gates all cross-era reuse.
 
-use crate::encryption::{default_vault_key_provider, encrypt_vault_blob};
+use crate::encryption::{VaultKeyProvider, encrypt_vault_blob};
 use crate::{BRIDGE_CATEGORY, BridgeError, EngineError, GazeEngine};
 use blake3 as blake3_crate;
 use xberg::{
@@ -113,6 +113,7 @@ pub async fn write_dual_store(
     document: &mut ExtractedDocument,
     redaction_config: &RedactionConfig,
     one_way_labels: &[String],
+    provider: &dyn VaultKeyProvider,
 ) -> Result<DualStoreOutput, DualStoreError> {
     // Compute fingerprint before any mutation.
     let fingerprint =
@@ -120,6 +121,9 @@ pub async fn write_dual_store(
 
     // Run gaze detection to get detections AND the manifest.
     let (detections, gaze_manifest) = engine.detect_with_manifest(&document.content)?;
+    let document_binding = blake3_crate::hash(document.content.as_bytes())
+        .to_hex()
+        .to_string();
 
     // Classify detections into one-way vs tokenized (same logic as redactor).
     let (dropped, kept) = classify_detections(detections, one_way_labels)?;
@@ -143,23 +147,21 @@ pub async fn write_dual_store(
         let shifted_findings = shift_findings(kept_findings, &dropped)?;
         let cfg = findings_config(RedactionStrategy::TokenReplace, shifted_findings);
         let vault_map = redact_capturing_rehydration_map(&mut temp_doc, &cfg).await?;
-        let provider =
-            default_vault_key_provider().map_err(|e| DualStoreError::Custody(e.to_string()))?;
-        let document_binding = blake3_crate::hash(document.content.as_bytes())
-            .to_hex()
-            .to_string();
-        let encrypted_vault = encrypt_vault_map(
-            vault_map,
-            &fingerprint,
+        let encrypted_vault =
+            encrypt_vault_map(vault_map, &fingerprint, &document_binding, provider)?;
+        let protected_gaze_manifest = encrypt_vault_blob(
+            &gaze_manifest,
+            fingerprint.as_str(),
             &document_binding,
-            provider.as_ref(),
-        )?;
+            provider,
+        )
+        .map_err(|e| DualStoreError::Custody(e.to_string()))?;
         // Keep binding metadata in the independently supplied manifest artifact;
         // rehydration checks it before asking custody for the decryption key.
         let gaze_manifest = serde_json::to_vec(&RehydrationManifest {
             fingerprint: fingerprint.clone(),
             document_binding: document_binding.clone(),
-            gaze_manifest,
+            gaze_manifest: protected_gaze_manifest,
         })?;
         // Commit the rewritten content back.
         document.content = temp_doc.content;
@@ -179,6 +181,19 @@ pub async fn write_dual_store(
     document.content = temp_doc.content;
     document.chunks = temp_doc.chunks;
     document.formatted_content = temp_doc.formatted_content;
+
+    let protected_gaze_manifest = encrypt_vault_blob(
+        &gaze_manifest,
+        fingerprint.as_str(),
+        &document_binding,
+        provider,
+    )
+    .map_err(|e| DualStoreError::Custody(e.to_string()))?;
+    let gaze_manifest = serde_json::to_vec(&RehydrationManifest {
+        fingerprint: fingerprint.clone(),
+        document_binding,
+        gaze_manifest: protected_gaze_manifest,
+    })?;
 
     Ok(DualStoreOutput {
         fingerprint,
