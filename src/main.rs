@@ -20,6 +20,7 @@ use hacienda_backend::{
 use std::process;
 use std::sync::Arc;
 
+#[derive(Debug)]
 struct CliAuthContext {
     binding: hacienda_backend::authz::PrincipalBinding,
     tenant_id: String,

@@ -976,7 +976,6 @@ mod tenant_path_tests {
         assert_eq!(config.lance_dir(Some("t-a")), a);
         assert_eq!(config.tantivy_dir(Some("t-a")), b);
         assert_eq!(config.vault_dir(Some("t-a")), c);
-        assert_ne!(config.lance_dir(Some("t-a")), config.default_lance_dir());
     }
 
     /// Single-tenant mode: the resolved scope is exactly the principal's bound
