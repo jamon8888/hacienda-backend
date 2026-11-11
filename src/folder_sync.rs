@@ -6,8 +6,12 @@
 //! - Engine-era fingerprint rebuild policy: full rebuild on fingerprint change,
 //!   incremental on content change.
 
-use crate::EngineEraFingerprint;
 use crate::config::HaciendaConfig;
+use crate::custody::{DocumentIdentity, persist_files};
+use crate::dual_store::{custody_artifacts, write_dual_store_for_document};
+use crate::encryption::vault_key_provider;
+use crate::validate_assurance_mode;
+use crate::{EngineEraFingerprint, GazeEngine};
 use blake3;
 use console;
 use crossbeam_channel::{Receiver, Sender, bounded};
@@ -17,7 +21,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::task::JoinHandle;
-use xberg::RedactionConfig;
+use xberg::{
+    ExtractedDocument, PiiCategory, RedactionConfig, RedactionOffsetEncoding, RedactionStrategy,
+};
 
 /// Sync event from the watcher or manual trigger.
 #[derive(Debug, Clone)]
@@ -38,7 +44,7 @@ pub struct IndexedDocument {
     pub doc_id: String,
     pub path: PathBuf,
     pub fingerprint: EngineEraFingerprint,
-    pub content_hash: String, // SHA256 of raw content for change detection
+    pub content_hash: String, // Blake3 of raw content for change detection
     pub last_modified: std::time::SystemTime,
 }
 
@@ -46,6 +52,7 @@ pub struct IndexedDocument {
 pub struct FolderSync {
     root: PathBuf,
     config: HaciendaConfig,
+    tenant_id: String,
     watcher: Option<RecommendedWatcher>,
     event_tx: Sender<SyncEvent>,
     event_rx: Receiver<SyncEvent>,
@@ -55,10 +62,17 @@ pub struct FolderSync {
 impl FolderSync {
     /// Create a new folder sync engine.
     pub fn new(root: PathBuf, config: HaciendaConfig) -> Self {
+        let tenant_id = config.default_tenant_id().to_owned();
+        Self::new_scoped(root, config, tenant_id)
+    }
+
+    /// Create a folder sync engine scoped to one authenticated tenant.
+    pub fn new_scoped(root: PathBuf, config: HaciendaConfig, tenant_id: String) -> Self {
         let (event_tx, event_rx) = bounded(1024);
         Self {
             root,
             config,
+            tenant_id,
             watcher: None,
             event_tx,
             event_rx,
@@ -91,9 +105,10 @@ impl FolderSync {
         let event_rx = self.event_rx;
         let config = self.config.clone();
         let root = self.root.clone();
+        let tenant_id = self.tenant_id.clone();
 
         let handle = tokio::spawn(async move {
-            Self::sync_loop(root, config, indexed, event_rx).await;
+            Self::sync_loop(root, config, tenant_id, indexed, event_rx).await;
         });
 
         Ok(handle)
@@ -120,13 +135,21 @@ impl FolderSync {
     async fn sync_loop(
         root: PathBuf,
         config: HaciendaConfig,
+        tenant_id: String,
         indexed: Arc<tokio::sync::RwLock<HashMap<String, IndexedDocument>>>,
         event_rx: Receiver<SyncEvent>,
     ) {
         while let Ok(event) = event_rx.recv() {
             match event {
                 SyncEvent::FileChanged { path } => {
-                    Self::handle_file_changed(&root, &config, &indexed, path).await;
+                    if let Err(error) =
+                        Self::handle_file_changed(&root, &config, &tenant_id, &indexed, path).await
+                    {
+                        eprintln!(
+                            "{} Document rejected before indexing: {error}",
+                            console::style("✗").red()
+                        );
+                    }
                 }
                 SyncEvent::FileDeleted { path } => {
                     Self::handle_file_deleted(&root, &indexed, path).await;
@@ -137,7 +160,7 @@ impl FolderSync {
                         console::style("▶").blue().bold(),
                         reason
                     );
-                    Self::full_rebuild(&root, &config, &indexed).await;
+                    Self::full_rebuild(&root, &config, &tenant_id, &indexed).await;
                 }
                 SyncEvent::Shutdown => break,
             }
@@ -147,10 +170,11 @@ impl FolderSync {
     /// Handle a file change: compute content hash, check fingerprint, re-index incrementally.
     async fn handle_file_changed(
         root: &Path,
-        _config: &HaciendaConfig,
+        config: &HaciendaConfig,
+        tenant_id: &str,
         indexed: &Arc<tokio::sync::RwLock<HashMap<String, IndexedDocument>>>,
         path: PathBuf,
-    ) {
+    ) -> Result<(), String> {
         // Skip non-files and hidden files
         if !path.is_file()
             || path
@@ -158,7 +182,7 @@ impl FolderSync {
                 .map(|n| n.to_string_lossy().starts_with('.'))
                 .unwrap_or(false)
         {
-            return;
+            return Ok(());
         }
 
         // Compute content hash
@@ -171,7 +195,7 @@ impl FolderSync {
                     path.display(),
                     e
                 );
-                return;
+                return Err(format!("source read failed: {e}"));
             }
         };
         let content_hash = blake3::hash(&content).to_hex().to_string();
@@ -179,7 +203,7 @@ impl FolderSync {
         // Get relative path as doc_id
         let doc_id = match path.strip_prefix(root) {
             Ok(p) => p.to_string_lossy().to_string(),
-            Err(_) => return,
+            Err(_) => return Err("source is outside the configured root".to_owned()),
         };
 
         // Check if already indexed with same hash
@@ -188,48 +212,87 @@ impl FolderSync {
             if let Some(existing) = idx.get(&doc_id)
                 && existing.content_hash == content_hash
             {
-                return; // No change
+                return Ok(()); // No change
             }
         }
 
-        // Extract content for processing
-        let _text = String::from_utf8_lossy(&content).to_string();
-
-        // Run dual-store write (this does gaze detection + redaction)
-        // In production, this would use the engine from config
-        // For now, we just update the index record
-        let fingerprint = EngineEraFingerprint::compute(
-            "gaze-assembly",
-            crate::TOKEN_GRAMMAR_VERSION,
-            &RedactionConfig {
-                categories: std::collections::HashSet::from([xberg::PiiCategory::Custom(
-                    crate::BRIDGE_CATEGORY.to_owned(),
-                )]),
-                strategy: xberg::RedactionStrategy::TokenReplace,
-                ner: None,
-                preserve_offsets: true,
-                custom_terms: Vec::new(),
-                custom_patterns: Vec::new(),
-                findings: Vec::new(),
-                min_score: None,
-                findings_path: None,
-                findings_offset_encoding: xberg::RedactionOffsetEncoding::Utf8Bytes,
-            },
-        );
+        let indexed_document =
+            Self::process_file(config, tenant_id, path, content, doc_id, content_hash).await?;
 
         let mut idx = indexed.write().await;
-        idx.insert(
-            doc_id.clone(),
-            IndexedDocument {
-                doc_id: doc_id.clone(),
-                path: path.clone(),
-                fingerprint,
-                content_hash,
-                last_modified: std::time::SystemTime::now(),
-            },
-        );
+        let doc_id = indexed_document.doc_id.clone();
+        idx.insert(doc_id.clone(), indexed_document);
 
         eprintln!("{} Indexed {}", console::style("✓").green(), doc_id);
+        Ok(())
+    }
+
+    async fn process_file(
+        config: &HaciendaConfig,
+        tenant_id: &str,
+        path: PathBuf,
+        content: Vec<u8>,
+        doc_id: String,
+        content_hash: String,
+    ) -> Result<IndexedDocument, String> {
+        let encryption = config.encryption_config(Some(tenant_id));
+        validate_assurance_mode(encryption, config.kms_config(Some(tenant_id)))
+            .map_err(|e| e.to_string())?;
+        let provider = vault_key_provider(encryption).map_err(|e| e.to_string())?;
+        let rulepacks: Vec<&str> = config
+            .redaction
+            .rulepacks
+            .iter()
+            .map(String::as_str)
+            .collect();
+        let engine = GazeEngine::core_floor_with(&rulepacks).map_err(|e| e.to_string())?;
+
+        let mut document = ExtractedDocument::default();
+        document.content = String::from_utf8_lossy(&content).into_owned();
+        let document_identity = DocumentIdentity::new(tenant_id, &doc_id, &content_hash);
+        let redaction_config = RedactionConfig {
+            categories: std::collections::HashSet::from([PiiCategory::Custom(
+                crate::BRIDGE_CATEGORY.to_owned(),
+            )]),
+            strategy: RedactionStrategy::TokenReplace,
+            ner: None,
+            preserve_offsets: true,
+            custom_terms: Vec::new(),
+            custom_patterns: Vec::new(),
+            findings: Vec::new(),
+            min_score: None,
+            findings_path: None,
+            findings_offset_encoding: RedactionOffsetEncoding::Utf8Bytes,
+        };
+        let output = write_dual_store_for_document(
+            &engine,
+            &mut document,
+            &redaction_config,
+            &config.redaction.one_way,
+            document_identity.clone(),
+            provider.as_ref(),
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+
+        // Custody is the ordering boundary: only after the complete encrypted
+        // bundle is durably committed may an index entry be created.
+        persist_files(
+            &custody_artifacts(&output),
+            &config.vault_dir(Some(tenant_id)),
+            &document_identity,
+            &output.fingerprint,
+            provider.as_ref(),
+        )
+        .map_err(|e| e.to_string())?;
+
+        Ok(IndexedDocument {
+            doc_id,
+            path,
+            fingerprint: output.fingerprint,
+            content_hash,
+            last_modified: std::time::SystemTime::now(),
+        })
     }
 
     /// Handle file deletion.
@@ -252,14 +315,20 @@ impl FolderSync {
     /// Full rebuild: re-process all files under root.
     async fn full_rebuild(
         root: &Path,
-        _config: &HaciendaConfig,
+        config: &HaciendaConfig,
+        tenant_id: &str,
         indexed: &Arc<tokio::sync::RwLock<HashMap<String, IndexedDocument>>>,
     ) {
-        let mut idx = indexed.write().await;
-        idx.clear();
+        indexed.write().await.clear();
 
-        let mut entries = tokio::fs::read_dir(root).await.expect("read dir");
-        while let Some(entry) = entries.next_entry().await.expect("next entry") {
+        let mut entries = match tokio::fs::read_dir(root).await {
+            Ok(entries) => entries,
+            Err(error) => {
+                eprintln!("{} Full rebuild failed: {error}", console::style("✗").red());
+                return;
+            }
+        };
+        while let Ok(Some(entry)) = entries.next_entry().await {
             let path = entry.path();
             if path.is_file()
                 && !path
@@ -267,50 +336,51 @@ impl FolderSync {
                     .map(|n| n.to_string_lossy().starts_with('.'))
                     .unwrap_or(false)
             {
-                let content = tokio::fs::read(&path).await.expect("read file");
+                let content = match tokio::fs::read(&path).await {
+                    Ok(content) => content,
+                    Err(error) => {
+                        eprintln!(
+                            "{} Document rejected before indexing: {error}",
+                            console::style("✗").red()
+                        );
+                        continue;
+                    }
+                };
                 let content_hash = blake3::hash(&content).to_hex().to_string();
-                let doc_id = path
+                let Some(doc_id) = path
                     .strip_prefix(root)
-                    .unwrap()
-                    .to_string_lossy()
-                    .to_string();
-
-                let fingerprint = EngineEraFingerprint::compute(
-                    "gaze-assembly",
-                    crate::TOKEN_GRAMMAR_VERSION,
-                    &RedactionConfig {
-                        categories: std::collections::HashSet::from([xberg::PiiCategory::Custom(
-                            crate::BRIDGE_CATEGORY.to_owned(),
-                        )]),
-                        strategy: xberg::RedactionStrategy::TokenReplace,
-                        ner: None,
-                        preserve_offsets: true,
-                        custom_terms: Vec::new(),
-                        custom_patterns: Vec::new(),
-                        findings: Vec::new(),
-                        min_score: None,
-                        findings_path: None,
-                        findings_offset_encoding: xberg::RedactionOffsetEncoding::Utf8Bytes,
-                    },
-                );
-
-                idx.insert(
+                    .ok()
+                    .map(|p| p.to_string_lossy().to_string())
+                else {
+                    continue;
+                };
+                match Self::process_file(
+                    config,
+                    tenant_id,
+                    path,
+                    content,
                     doc_id.clone(),
-                    IndexedDocument {
-                        doc_id,
-                        path,
-                        fingerprint,
-                        content_hash,
-                        last_modified: std::time::SystemTime::now(),
-                    },
-                );
+                    content_hash,
+                )
+                .await
+                {
+                    Ok(indexed_document) => {
+                        indexed.write().await.insert(doc_id, indexed_document);
+                    }
+                    Err(error) => {
+                        eprintln!(
+                            "{} Document rejected before indexing: {error}",
+                            console::style("✗").red()
+                        );
+                    }
+                }
             }
         }
 
         eprintln!(
             "{} Full rebuild complete: {} documents",
             console::style("✓").green(),
-            idx.len()
+            indexed.read().await.len()
         );
     }
 
@@ -364,7 +434,7 @@ pub async fn run_manual_refresh_scoped(
         .ok_or_else(|| crate::CliError::Other("tenant unavailable".into()))?;
     let mut all = Vec::new();
     for root in roots {
-        let sync = FolderSync::new(root.clone(), config.clone());
+        let sync = FolderSync::new_scoped(root.clone(), config.clone(), tenant_id.to_owned());
         if full {
             sync.manual_refresh().await;
         } else {

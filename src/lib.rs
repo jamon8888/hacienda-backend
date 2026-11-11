@@ -25,13 +25,15 @@ pub use cli::{Cli, Commands, DoctorArgs, ExportRecoveryArgs, McpArgs, RehydrateA
 pub use cli_error::CliError;
 pub use config::{ConfigError, HaciendaConfig, RedactionConfig, doctor_checks, load_config};
 pub use custody::{
-    CustodyArtifacts, CustodyError, CustodyManifest, DocumentIdentity, VerifiedCustody,
+    CustodyArtifactPaths, CustodyArtifacts, CustodyError, CustodyManifest, DocumentIdentity,
+    VerifiedCustody,
 };
 pub use disclosure_ledger::{
     DisclosureHandle, DisclosureLedger, DisclosureRequest, DisclosureStatus,
 };
 pub use dual_store::{
-    DualStoreError, DualStoreOutput, EngineEraFingerprint, TOKEN_GRAMMAR_VERSION, write_dual_store,
+    DualStoreError, DualStoreOutput, EngineEraFingerprint, TOKEN_GRAMMAR_VERSION,
+    custody_artifacts, write_dual_store, write_dual_store_for_document,
 };
 pub use folder_sync::{
     FolderSync, IndexedDocument, SyncEvent, run_manual_refresh, run_manual_refresh_scoped,

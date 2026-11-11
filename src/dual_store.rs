@@ -3,7 +3,8 @@
 //! One detection pass produces both stores (ADR-0002). The fingerprint
 //! `engine_id × token_grammar_version × redaction_config` gates all cross-era reuse.
 
-use crate::encryption::{default_vault_key_provider, encrypt_vault_blob};
+use crate::custody::{CustodyArtifacts, DocumentIdentity, seal_custody};
+use crate::encryption::{VaultKeyProvider, default_vault_key_provider};
 use crate::{BRIDGE_CATEGORY, BridgeError, EngineError, GazeEngine};
 use blake3 as blake3_crate;
 use xberg::{
@@ -77,10 +78,14 @@ pub struct RehydrationManifest {
 pub struct DualStoreOutput {
     /// Engine-era fingerprint for this write.
     pub fingerprint: EngineEraFingerprint,
-    /// Gaze manifest bytes (sensitive snapshot + evidence tiers).
-    pub gaze_manifest: Vec<u8>,
-    /// XPII\x01 encrypted vault map (token -> original PII).
+    /// Canonical custody manifest bytes. It contains no raw snapshot bytes.
+    pub manifest: Vec<u8>,
+    /// Authenticated encrypted Gaze SensitiveSnapshot/session bytes.
+    pub encrypted_sensitive_snapshot: Vec<u8>,
+    /// XPII\x01-compatible authenticated encrypted TokenReplace map.
     pub vault_map: Vec<u8>,
+    /// Document identity bound into all three persisted artifacts.
+    pub document_identity: DocumentIdentity,
     /// The redaction report from xberg (for audit).
     pub redaction_report: Option<RedactionReport>,
 }
@@ -114,15 +119,57 @@ pub async fn write_dual_store(
     redaction_config: &RedactionConfig,
     one_way_labels: &[String],
 ) -> Result<DualStoreOutput, DualStoreError> {
+    let provider =
+        default_vault_key_provider().map_err(|e| DualStoreError::Custody(e.to_string()))?;
+    let document_identity = DocumentIdentity::new(
+        "legacy",
+        "legacy",
+        blake3_crate::hash(document.content.as_bytes())
+            .to_hex()
+            .to_string(),
+    );
+    write_dual_store_for_document(
+        engine,
+        document,
+        redaction_config,
+        one_way_labels,
+        document_identity,
+        provider.as_ref(),
+    )
+    .await
+}
+
+/// Produce a custody-bound dual-store output for an authenticated document.
+///
+/// The returned manifest, encrypted SensitiveSnapshot/session, and encrypted
+/// TokenReplace map are created as one logical unit. Callers must persist all
+/// three successfully before indexing the redacted content.
+pub async fn write_dual_store_for_document(
+    engine: &GazeEngine,
+    document: &mut ExtractedDocument,
+    redaction_config: &RedactionConfig,
+    one_way_labels: &[String],
+    document_identity: DocumentIdentity,
+    provider: &dyn VaultKeyProvider,
+) -> Result<DualStoreOutput, DualStoreError> {
     // Compute fingerprint before any mutation.
     let fingerprint =
         EngineEraFingerprint::compute("gaze-assembly", TOKEN_GRAMMAR_VERSION, redaction_config);
+
+    let actual_content_hash = blake3_crate::hash(document.content.as_bytes())
+        .to_hex()
+        .to_string();
+    if document_identity.content_hash != actual_content_hash {
+        return Err(DualStoreError::Custody(
+            "document identity content hash does not match source content".to_owned(),
+        ));
+    }
 
     // Run gaze detection to get detections AND the manifest.
     let (detections, gaze_manifest) = engine.detect_with_manifest(&document.content)?;
 
     // Classify detections into one-way vs tokenized (same logic as redactor).
-    let (dropped, kept) = classify_detections(detections, one_way_labels)?;
+    let (dropped, kept) = classify_detections(detections.clone(), one_way_labels)?;
 
     // Prepare xberg external findings for both passes.
     let dropped_findings = findings_from_detections(&dropped)?;
@@ -139,53 +186,89 @@ pub async fn write_dual_store(
     }
 
     // Pass B: TokenReplace kept spans (with pre-shifted offsets).
+    let mut token_replace = RehydrationMap::new();
     if !kept_findings.is_empty() {
         let shifted_findings = shift_findings(kept_findings, &dropped)?;
         let cfg = findings_config(RedactionStrategy::TokenReplace, shifted_findings);
-        let vault_map = redact_capturing_rehydration_map(&mut temp_doc, &cfg).await?;
-        let provider =
-            default_vault_key_provider().map_err(|e| DualStoreError::Custody(e.to_string()))?;
-        let document_binding = blake3_crate::hash(document.content.as_bytes())
-            .to_hex()
-            .to_string();
-        let encrypted_vault = encrypt_vault_map(
-            vault_map,
-            &fingerprint,
-            &document_binding,
-            provider.as_ref(),
-        )?;
-        // Keep binding metadata in the independently supplied manifest artifact;
-        // rehydration checks it before asking custody for the decryption key.
-        let gaze_manifest = serde_json::to_vec(&RehydrationManifest {
-            fingerprint: fingerprint.clone(),
-            document_binding: document_binding.clone(),
-            gaze_manifest,
-        })?;
-        // Commit the rewritten content back.
-        document.content = temp_doc.content;
-        document.chunks = temp_doc.chunks;
-        document.formatted_content = temp_doc.formatted_content;
-        // Note: other fields (entities, tables, etc.) would also be updated in full impl.
-
-        return Ok(DualStoreOutput {
-            fingerprint,
-            gaze_manifest,
-            vault_map: encrypted_vault,
-            redaction_report: temp_doc.redaction_report,
-        });
+        token_replace = redact_capturing_rehydration_map(&mut temp_doc, &cfg).await?;
     }
 
-    // No kept findings: just the drop pass happened.
+    // The raw Gaze session snapshot is never put in the plaintext manifest.
+    // The canonical manifest records only class/offset provenance and is bound
+    // to the encrypted snapshot by `seal_custody`'s digest.
+    let canonical_gaze_manifest =
+        canonical_gaze_manifest(&fingerprint, &document_identity, &detections)?;
+    let custody = seal_custody(
+        &canonical_gaze_manifest,
+        &gaze_manifest,
+        &token_replace,
+        document_identity.clone(),
+        fingerprint.clone(),
+        provider,
+    )
+    .map_err(|e| DualStoreError::Custody(e.to_string()))?;
+
+    // Commit the rewritten content back only after all custody artifacts have
+    // been successfully sealed. Persistence happens in the production sync
+    // caller before it creates an index entry.
     document.content = temp_doc.content;
     document.chunks = temp_doc.chunks;
     document.formatted_content = temp_doc.formatted_content;
 
     Ok(DualStoreOutput {
         fingerprint,
-        gaze_manifest,
-        vault_map: Vec::new(), // No vault map needed if nothing tokenized.
+        manifest: custody.manifest,
+        encrypted_sensitive_snapshot: custody.encrypted_sensitive_snapshot,
+        vault_map: custody.encrypted_token_replace,
+        document_identity,
         redaction_report: temp_doc.redaction_report,
     })
+}
+
+/// Explicitly retain the complete custody result for callers that need to
+/// persist it as a bundle without unpacking the output fields.
+pub fn custody_artifacts(output: &DualStoreOutput) -> CustodyArtifacts {
+    CustodyArtifacts {
+        manifest: output.manifest.clone(),
+        encrypted_sensitive_snapshot: output.encrypted_sensitive_snapshot.clone(),
+        encrypted_token_replace: output.vault_map.clone(),
+    }
+}
+
+#[derive(serde::Serialize)]
+struct CanonicalGazeManifest<'a> {
+    version: u8,
+    fingerprint: &'a EngineEraFingerprint,
+    document: &'a DocumentIdentity,
+    findings: Vec<CanonicalFinding>,
+}
+
+#[derive(serde::Serialize)]
+struct CanonicalFinding {
+    label: String,
+    start: usize,
+    end: usize,
+}
+
+fn canonical_gaze_manifest(
+    fingerprint: &EngineEraFingerprint,
+    document: &DocumentIdentity,
+    detections: &[crate::Detection],
+) -> Result<Vec<u8>, DualStoreError> {
+    let findings = detections
+        .iter()
+        .map(|d| CanonicalFinding {
+            label: crate::redactor::class_label(&d.class),
+            start: d.start,
+            end: d.end,
+        })
+        .collect();
+    Ok(serde_json::to_vec(&CanonicalGazeManifest {
+        version: 1,
+        fingerprint,
+        document,
+        findings,
+    })?)
 }
 
 /// Convert detections to xberg external findings.
@@ -330,18 +413,6 @@ fn findings_config(
         findings_path: None,
         findings_offset_encoding: xberg::RedactionOffsetEncoding::Utf8Bytes,
     }
-}
-
-/// Encrypt the rehydration map to XPII\x01 format.
-fn encrypt_vault_map(
-    map: RehydrationMap,
-    fingerprint: &EngineEraFingerprint,
-    document_binding: &str,
-    provider: &dyn crate::encryption::VaultKeyProvider,
-) -> Result<Vec<u8>, DualStoreError> {
-    let plaintext = serde_json::to_vec(&map)?;
-    encrypt_vault_blob(&plaintext, fingerprint.as_str(), document_binding, provider)
-        .map_err(|e| DualStoreError::Custody(e.to_string()))
 }
 
 /// Token grammar version for fingerprinting.

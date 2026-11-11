@@ -85,12 +85,17 @@ impl VaultKeyProvider for KeychainKms {
 
 /// Reject insecure KMS choices before any encryption engine is started.
 pub fn validate_assurance_mode(config: &EncryptionConfig, kms: Option<&KmsConfig>) -> Result<()> {
-    if config.assurance_mode == AssuranceMode::Production
-        && matches!(kms, Some(KmsConfig::Local { .. }))
-    {
-        return Err(anyhow!(
-            "production assurance mode rejects Local KMS; use macOS Keychain or an authenticated KMS"
-        ));
+    if config.assurance_mode == AssuranceMode::Production {
+        if matches!(kms, Some(KmsConfig::Local { .. })) {
+            return Err(anyhow!(
+                "production assurance mode rejects Local KMS; use macOS Keychain or an authenticated KMS"
+            ));
+        }
+        if std::env::var_os("HACIENDA_VAULT_FIXTURE_KEY").is_some() {
+            return Err(anyhow!(
+                "production assurance mode rejects fixture vault custody"
+            ));
+        }
     }
     Ok(())
 }
@@ -126,6 +131,11 @@ pub fn default_provider() -> Result<Box<dyn VaultKeyProvider>> {
             Ok(Box::new(FixtureVaultKeyProvider(*digest.as_bytes())))
         }
         Ok("production") | Err(_) => {
+            if std::env::var_os("HACIENDA_VAULT_FIXTURE_KEY").is_some() {
+                return Err(anyhow!(
+                    "production assurance mode rejects fixture vault custody"
+                ));
+            }
             let provider = KeychainKms;
             provider
                 .load_vault_key()

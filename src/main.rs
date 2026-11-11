@@ -12,10 +12,9 @@ use console::style;
 use hacienda_backend::{
     McpServer, TenantSearchEngineManager,
     audit::AuditLog,
-    cli::{Cli, Commands, McpArgs},
+    cli::{AssuranceModeArg, Cli, Commands, McpArgs},
     cli_error::CliError,
-    doctor_checks, get_vault_passphrase, load_config, log_audit, run_export_recovery,
-    run_rehydrate,
+    doctor_checks, load_config, log_audit, run_export_recovery, run_rehydrate,
 };
 use std::process;
 use std::sync::Arc;
@@ -46,6 +45,46 @@ fn cli_auth(
     })
 }
 
+fn enforce_assurance_mode(
+    requested: AssuranceModeArg,
+    config: &hacienda_backend::HaciendaConfig,
+    tenant_id: Option<&str>,
+) -> Result<(), CliError> {
+    let configured = config.encryption_config(tenant_id);
+    let requested = match requested {
+        AssuranceModeArg::Production => hacienda_backend::config::AssuranceMode::Production,
+        AssuranceModeArg::Development => hacienda_backend::config::AssuranceMode::Development,
+    };
+    if configured.assurance_mode != requested {
+        return Err(CliError::Other(
+            "--assurance-mode must explicitly match the configured custody mode".into(),
+        ));
+    }
+    hacienda_backend::validate_assurance_mode(configured, config.kms_config(tenant_id))
+        .map_err(|e| CliError::Other(e.to_string()))
+}
+
+fn enforce_assurance_mode_for_all_tenants(
+    requested: AssuranceModeArg,
+    config: &hacienda_backend::HaciendaConfig,
+) -> Result<(), CliError> {
+    enforce_assurance_mode(requested, config, None)?;
+    for tenant in &config.tenants {
+        enforce_assurance_mode(requested, config, Some(&tenant.tenant_id))?;
+    }
+    Ok(())
+}
+
+fn custody_provider(
+    requested: AssuranceModeArg,
+    config: &hacienda_backend::HaciendaConfig,
+    tenant_id: &str,
+) -> Result<Box<dyn hacienda_backend::encryption::VaultKeyProvider>, CliError> {
+    enforce_assurance_mode(requested, config, Some(tenant_id))?;
+    hacienda_backend::encryption::vault_key_provider(config.encryption_config(Some(tenant_id)))
+        .map_err(|e| CliError::Other(e.to_string()))
+}
+
 fn main() {
     let cli = Cli::parse();
 
@@ -61,18 +100,19 @@ fn run_command(cli: Cli) -> Result<(), CliError> {
         Commands::Rehydrate(args) => {
             let config = load_config(&args.config)?;
             let auth = cli_auth(&config, args.tenant.as_deref())?;
-            let passphrase = get_vault_passphrase()?;
+            let provider = custody_provider(cli.assurance_mode, &config, &auth.tenant_id)?;
             let audit = rt.block_on(run_rehydrate(
                 args,
-                &passphrase,
                 &auth.binding,
                 &auth.tenant_id,
+                provider.as_ref(),
             ))?;
             log_audit(&audit)?;
         }
         Commands::Doctor(args) => {
             let config = load_config(&args.config)?;
             let _auth = cli_auth(&config, None)?;
+            enforce_assurance_mode_for_all_tenants(cli.assurance_mode, &config)?;
             let errors = doctor_checks(&config);
 
             match args.format.as_str() {
@@ -103,12 +143,12 @@ fn run_command(cli: Cli) -> Result<(), CliError> {
         Commands::ExportRecovery(args) => {
             let config = load_config(&args.config)?;
             let auth = cli_auth(&config, args.tenant.as_deref())?;
-            let passphrase = get_vault_passphrase()?;
+            let provider = custody_provider(cli.assurance_mode, &config, &auth.tenant_id)?;
             rt.block_on(run_export_recovery(
                 args,
-                &passphrase,
                 &auth.binding,
                 &auth.tenant_id,
+                provider.as_ref(),
             ))?;
         }
         Commands::Sync(args) => {
@@ -123,6 +163,7 @@ fn run_command(cli: Cli) -> Result<(), CliError> {
                 // For now, just run manual refresh
             }
             let auth = cli_auth(&config, args.tenant.as_deref())?;
+            enforce_assurance_mode(cli.assurance_mode, &config, Some(&auth.tenant_id))?;
             let roots = config
                 .get_tenant(&auth.tenant_id)
                 .ok_or_else(|| CliError::Other("tenant unavailable".into()))?
@@ -138,13 +179,13 @@ fn run_command(cli: Cli) -> Result<(), CliError> {
             ))?;
         }
         Commands::Mcp(args) => {
-            rt.block_on(run_mcp(args))?;
+            rt.block_on(run_mcp(args, cli.assurance_mode))?;
         }
     }
     Ok(())
 }
 
-async fn run_mcp(args: McpArgs) -> Result<(), CliError> {
+async fn run_mcp(args: McpArgs, assurance_mode: AssuranceModeArg) -> Result<(), CliError> {
     let principal_id = std::env::var("HACIENDA_PRINCIPAL")
         .map_err(|_| CliError::Other("HACIENDA_PRINCIPAL is required".into()))?;
     let config_path = args
@@ -152,6 +193,7 @@ async fn run_mcp(args: McpArgs) -> Result<(), CliError> {
         .clone()
         .ok_or_else(|| CliError::Other("--config is required for authenticated MCP".into()))?;
     let config = load_config(&config_path)?;
+    enforce_assurance_mode_for_all_tenants(assurance_mode, &config)?;
     let resolver = hacienda_backend::DefaultResolver::from_config(&config, &principal_id)
         .map_err(|_| CliError::Other("principal is not bound in configuration".into()))?;
     let roots = config

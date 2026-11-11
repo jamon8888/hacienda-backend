@@ -86,7 +86,8 @@ pub struct CustodyManifest {
     pub version: u8,
     pub fingerprint: EngineEraFingerprint,
     pub document: DocumentIdentity,
-    /// Canonical Gaze provenance. It is not restore authority by itself.
+    /// Canonical, non-sensitive Gaze provenance. The SensitiveSnapshot/session
+    /// itself is stored only in `encrypted_sensitive_snapshot`.
     pub gaze_manifest: Vec<u8>,
     pub gaze_manifest_digest: String,
     pub sensitive_snapshot_digest: String,
@@ -102,6 +103,15 @@ pub struct CustodyArtifacts {
     pub encrypted_sensitive_snapshot: Vec<u8>,
     /// Authenticated encrypted xberg TokenReplace map bytes.
     pub encrypted_token_replace: Vec<u8>,
+}
+
+/// Paths of a custody bundle after it has been committed to durable storage.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CustodyArtifactPaths {
+    pub directory: std::path::PathBuf,
+    pub manifest: std::path::PathBuf,
+    pub sensitive_snapshot: std::path::PathBuf,
+    pub token_replace: std::path::PathBuf,
 }
 
 /// Result returned only after every custody check has passed.
@@ -126,9 +136,6 @@ pub fn seal_custody(
     }
     if sensitive_snapshot.is_empty() {
         return Err(CustodyError::MissingArtifact("sensitive snapshot/session"));
-    }
-    if token_replace.is_empty() {
-        return Err(CustodyError::MissingArtifact("TokenReplace map"));
     }
     document.validate()?;
     if fingerprint.as_str().is_empty() {
@@ -239,10 +246,6 @@ pub fn verify_and_decrypt(
     }
     let token_replace: RehydrationMap = serde_json::from_slice(&token_replace_bytes)
         .map_err(|e| CustodyError::Integrity(format!("TokenReplace map is invalid: {e}")))?;
-    if token_replace.is_empty() {
-        return Err(CustodyError::MissingArtifact("TokenReplace map"));
-    }
-
     // The session format is signed by Gaze. Importing it verifies the
     // SensitiveSnapshot/session envelope before it can be used for restore.
     gaze::Session::import(gaze::SensitiveSnapshot::from(sensitive_snapshot.clone()))
@@ -253,6 +256,89 @@ pub fn verify_and_decrypt(
         sensitive_snapshot,
         token_replace,
     })
+}
+
+/// Persist a complete custody bundle with an atomic directory commit.
+///
+/// The final directory is addressed by a hash of the full document identity,
+/// never by an untrusted document id. Existing complete bundles are reused;
+/// incomplete bundles fail closed rather than being overwritten.
+pub fn persist_files(
+    artifacts: &CustodyArtifacts,
+    vault_dir: &Path,
+    document: &DocumentIdentity,
+    expected_fingerprint: &EngineEraFingerprint,
+    provider: &dyn VaultKeyProvider,
+) -> Result<CustodyArtifactPaths, CustodyError> {
+    document.validate()?;
+    if artifacts.manifest.is_empty() {
+        return Err(CustodyError::MissingArtifact("manifest"));
+    }
+    if artifacts.encrypted_sensitive_snapshot.is_empty() {
+        return Err(CustodyError::MissingArtifact("sensitive snapshot/session"));
+    }
+    if artifacts.encrypted_token_replace.is_empty() {
+        return Err(CustodyError::MissingArtifact("TokenReplace map"));
+    }
+
+    create_private_dir(vault_dir)?;
+    let directory = vault_dir.join(document.binding());
+    let paths = CustodyArtifactPaths {
+        manifest: directory.join("manifest.json"),
+        sensitive_snapshot: directory.join("sensitive-snapshot.bin"),
+        token_replace: directory.join("token-replace.bin"),
+        directory: directory.clone(),
+    };
+
+    if directory.exists() {
+        if paths.manifest.is_file()
+            && paths.sensitive_snapshot.is_file()
+            && paths.token_replace.is_file()
+        {
+            verify_files(
+                &paths.manifest,
+                &paths.sensitive_snapshot,
+                &paths.token_replace,
+                document,
+                expected_fingerprint,
+                provider,
+            )?;
+            return Ok(paths);
+        }
+        return Err(CustodyError::Integrity(
+            "existing custody bundle is incomplete".to_owned(),
+        ));
+    }
+
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| CustodyError::Integrity(format!("clock failure: {e}")))?
+        .as_nanos();
+    let temporary = vault_dir.join(format!(
+        ".{}-tmp-{}-{nonce}",
+        document.binding(),
+        std::process::id()
+    ));
+    create_private_dir(&temporary)?;
+
+    let result = (|| {
+        write_private_file(&temporary.join("manifest.json"), &artifacts.manifest)?;
+        write_private_file(
+            &temporary.join("sensitive-snapshot.bin"),
+            &artifacts.encrypted_sensitive_snapshot,
+        )?;
+        write_private_file(
+            &temporary.join("token-replace.bin"),
+            &artifacts.encrypted_token_replace,
+        )?;
+        std::fs::rename(&temporary, &directory)?;
+        Ok(paths)
+    })();
+
+    if result.is_err() {
+        let _ = std::fs::remove_dir_all(&temporary);
+    }
+    result
 }
 
 /// Read three artifact files and perform the same all-or-nothing verification.
@@ -315,4 +401,33 @@ fn artifact_binding(document: &DocumentIdentity, kind: &str) -> String {
 
 fn digest(bytes: &[u8]) -> String {
     blake3::hash(bytes).to_hex().to_string()
+}
+
+fn create_private_dir(path: &Path) -> Result<(), CustodyError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        let mut builder = std::fs::DirBuilder::new();
+        builder.mode(0o700).recursive(true);
+        builder.create(path)?;
+    }
+    #[cfg(not(unix))]
+    std::fs::create_dir_all(path)?;
+    Ok(())
+}
+
+fn write_private_file(path: &Path, bytes: &[u8]) -> Result<(), CustodyError> {
+    use std::io::Write;
+
+    #[cfg(unix)]
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let mut file = options.open(path)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    Ok(())
 }
