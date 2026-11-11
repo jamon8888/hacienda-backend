@@ -247,30 +247,25 @@ where
             .await
             .map_err(|_| ErrorData::invalid_request("authentication required", None))?;
 
-        // Capability check (registry already filters, but double-check here).
-        // Tenant IDs in payloads are selectors only; authorization comes solely
-        // from the authenticated principal binding and fails closed.
-        if !payload_tenant_authorized(&principal, request.arguments.as_ref()) {
-            if request.name == "attach_local_doc" {
-                let tenant = request
-                    .arguments
-                    .as_ref()
-                    .and_then(|a| a.get("tenant_id"))
-                    .and_then(|v| v.as_str());
-                audit_authz(
-                    &self.state,
-                    &principal,
-                    tenant,
-                    "deny",
-                    "tenant_unauthorized",
-                    "ERROR_CODE",
+        // Resolve the tenant before touching any tenant-scoped engine, root, or
+        // path. Payload tenant IDs are selectors only; authorization comes
+        // solely from the authenticated principal binding and fails closed.
+        let tenant = match request.name.as_ref() {
+            "search" | "sync" | "status" | "attach_local_doc" | "graph_entities" | "graph_rag" => {
+                Some(
+                    resolve_authorized_tenant(&principal, request.arguments.as_ref()).map_err(
+                        |_| {
+                            if request.name == "attach_local_doc" {
+                                ErrorData::invalid_params(GENERIC_DOCUMENT_DENIAL, None)
+                            } else {
+                                ErrorData::invalid_params(GENERIC_REQUEST_DENIAL, None)
+                            }
+                        },
+                    )?,
                 )
-                .await
-                .map_err(|_| ErrorData::internal_error("audit unavailable", None))?;
-                return Err(ErrorData::invalid_params("document unavailable", None));
             }
-            return Err(ErrorData::invalid_params("tenant unauthorized", None));
-        }
+            _ => None,
+        };
         let has_cap = |cap: Capability| principal.capabilities.contains(&cap);
         if request.name == "attach_local_doc" && !has_cap(Capability::AttachLocalDoc) {
             audit_authz(
@@ -287,7 +282,7 @@ where
             )
             .await
             .map_err(|_| ErrorData::internal_error("audit unavailable", None))?;
-            return Err(ErrorData::invalid_params("document unavailable", None));
+            return Err(ErrorData::invalid_params(GENERIC_DOCUMENT_DENIAL, None));
         }
 
         let result = match request.name.as_ref() {
@@ -300,7 +295,7 @@ where
                 }
                 let args = request.arguments.clone();
                 let start = std::time::Instant::now();
-                let result = handle_search(&self.state, args.clone()).await;
+                let result = handle_search(&self.state, args.clone(), &principal).await;
                 let duration = start.elapsed();
                 let (result_summary, _success) = match &result {
                     Ok(_) => (format!("OK ({}ms)", duration.as_millis()), true),
@@ -395,7 +390,7 @@ where
                 }
                 let args = request.arguments.clone();
                 let start = std::time::Instant::now();
-                let result = handle_status(&self.state, args.clone()).await;
+                let result = handle_status(&self.state, args.clone(), &principal).await;
                 let duration = start.elapsed();
                 let (result_summary, _success) = match &result {
                     Ok(_) => (format!("OK ({}ms)", duration.as_millis()), true),
@@ -452,7 +447,7 @@ where
                     )
                     .await
                     .map_err(|_| ErrorData::internal_error("audit unavailable", None))?;
-                    return Err(ErrorData::invalid_params("document unavailable", None));
+                    return Err(ErrorData::invalid_params(GENERIC_DOCUMENT_DENIAL, None));
                 }
                 let args = match request.arguments.clone() {
                     Some(args) => args,
@@ -467,38 +462,12 @@ where
                         )
                         .await
                         .map_err(|_| ErrorData::internal_error("audit unavailable", None))?;
-                        return Err(ErrorData::invalid_params("document unavailable", None));
+                        return Err(ErrorData::invalid_params(GENERIC_DOCUMENT_DENIAL, None));
                     }
                 };
-                let tenant = match args.get("tenant_id").and_then(|v| v.as_str()) {
-                    Some(t) if principal.tenant_ids.contains(t) => t,
-                    Some(t) => {
-                        audit_authz(
-                            &self.state,
-                            &principal,
-                            Some(t),
-                            "deny",
-                            "tenant_unauthorized",
-                            "ERROR_CODE",
-                        )
-                        .await
-                        .map_err(|_| ErrorData::internal_error("audit unavailable", None))?;
-                        return Err(ErrorData::invalid_params("document unavailable", None));
-                    }
-                    None => {
-                        audit_authz(
-                            &self.state,
-                            &principal,
-                            None,
-                            "deny",
-                            "invalid_reference",
-                            "ERROR_CODE",
-                        )
-                        .await
-                        .map_err(|_| ErrorData::internal_error("audit unavailable", None))?;
-                        return Err(ErrorData::invalid_params("document unavailable", None));
-                    }
-                };
+                let tenant = tenant
+                    .as_deref()
+                    .ok_or_else(|| ErrorData::invalid_params(GENERIC_DOCUMENT_DENIAL, None))?;
                 let path = match args.get("path").and_then(|v| v.as_str()) {
                     Some(path) => path,
                     None => {
@@ -512,7 +481,7 @@ where
                         )
                         .await
                         .map_err(|_| ErrorData::internal_error("audit unavailable", None))?;
-                        return Err(ErrorData::invalid_params("document unavailable", None));
+                        return Err(ErrorData::invalid_params(GENERIC_DOCUMENT_DENIAL, None));
                     }
                 };
                 let processed = self.state.processed_index.read().await;
@@ -529,7 +498,7 @@ where
                         )
                         .await
                         .map_err(|_| ErrorData::internal_error("audit unavailable", None))?;
-                        return Err(ErrorData::invalid_params("document unavailable", None));
+                        return Err(ErrorData::invalid_params(GENERIC_DOCUMENT_DENIAL, None));
                     }
                 };
                 let entries = processed.get(tenant).cloned().unwrap_or_default();
@@ -546,7 +515,7 @@ where
                         )
                         .await
                         .map_err(|_| ErrorData::internal_error("audit unavailable", None))?;
-                        return Err(ErrorData::invalid_params("document unavailable", None));
+                        return Err(ErrorData::invalid_params(GENERIC_DOCUMENT_DENIAL, None));
                     }
                 };
                 audit_authz(
@@ -710,43 +679,50 @@ fn authz_reason(error: &AuthzError) -> &'static str {
 
 // ===== Tool handlers =====
 
-/// A payload `tenant_id` is a selector among the principal's authorized tenants
-/// only; it can never expand access. No `tenant_id` in the payload defers to the
-/// per-handler single-binding resolution. (issue #22)
-fn payload_tenant_authorized(
+const GENERIC_REQUEST_DENIAL: &str = "request unavailable";
+const GENERIC_DOCUMENT_DENIAL: &str = "document unavailable";
+
+/// Resolve a tenant selector without ever treating caller input as a grant.
+/// A missing selector is accepted only for a principal bound to exactly one
+/// tenant. Invalid, unknown, and cross-tenant selectors all fail identically.
+fn resolve_authorized_tenant(
     principal: &Principal,
     args: Option<&serde_json::Map<String, Value>>,
-) -> bool {
-    match args
-        .and_then(|a| a.get("tenant_id"))
-        .and_then(|v| v.as_str())
-    {
-        Some(tenant) => principal.tenant_ids.contains(tenant),
-        None => true,
+) -> Result<String, ()> {
+    let requested = match args.and_then(|a| a.get("tenant_id")) {
+        None => None,
+        Some(Value::String(tenant)) if !tenant.is_empty() => Some(tenant.as_str()),
+        Some(_) => return Err(()),
+    };
+
+    match requested {
+        Some(tenant) if principal.tenant_ids.contains(tenant) => Ok(tenant.to_owned()),
+        Some(_) => Err(()),
+        None if principal.tenant_ids.len() == 1 => {
+            principal.tenant_ids.iter().next().cloned().ok_or(())
+        }
+        None => Err(()),
     }
 }
 
 async fn handle_search(
     state: &ServerState,
     args: Option<serde_json::Map<String, Value>>,
+    principal: &Principal,
 ) -> Result<CallToolResult, McpError> {
+    let tenant_id = resolve_authorized_tenant(principal, args.as_ref())
+        .map_err(|_| ErrorData::invalid_params(GENERIC_REQUEST_DENIAL, None))?;
     let engine_manager = state
         .search_engine
         .as_ref()
-        .ok_or_else(|| ErrorData::internal_error("search engine not initialized", None))?;
+        .ok_or_else(|| ErrorData::invalid_params(GENERIC_REQUEST_DENIAL, None))?;
 
     let args_map = args.ok_or_else(|| ErrorData::invalid_params("missing arguments", None))?;
 
-    // Extract tenant_id from arguments (required for multi-tenancy)
-    let tenant_id = args_map
-        .get("tenant_id")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| ErrorData::invalid_params("argument 'tenant_id' (string) required", None))?;
-
     // Get the engine for the specific tenant
     let engine = engine_manager
-        .get_engine(tenant_id)
-        .ok_or_else(|| ErrorData::invalid_params("tenant unavailable", None))?;
+        .get_engine(&tenant_id)
+        .ok_or_else(|| ErrorData::invalid_params(GENERIC_REQUEST_DENIAL, None))?;
 
     let params = parse_search_params(Some(args_map))
         .map_err(|_| ErrorData::invalid_params("invalid search arguments", None))?;
@@ -767,28 +743,17 @@ async fn handle_sync(
     args: Option<serde_json::Map<String, Value>>,
     principal: &Principal,
 ) -> Result<CallToolResult, McpError> {
-    let tenant = match args
-        .as_ref()
-        .and_then(|a| a.get("tenant_id"))
-        .and_then(|v| v.as_str())
-        .map(str::to_owned)
-    {
-        Some(t) if principal.tenant_ids.contains(&t) => t,
-        Some(_) => return Err(ErrorData::invalid_params("tenant unauthorized", None)),
-        None if principal.tenant_ids.len() == 1 => {
-            principal.tenant_ids.iter().next().cloned().unwrap()
-        }
-        _ => return Err(ErrorData::invalid_params("tenant_id required", None)),
-    };
+    let tenant = resolve_authorized_tenant(principal, args.as_ref())
+        .map_err(|_| ErrorData::invalid_params(GENERIC_REQUEST_DENIAL, None))?;
     let roots = state
         .folder_roots
         .get(&tenant)
-        .ok_or_else(|| ErrorData::invalid_params("tenant unavailable", None))?;
+        .ok_or_else(|| ErrorData::invalid_params(GENERIC_REQUEST_DENIAL, None))?;
     let root_paths: Vec<PathBuf> = roots.iter().map(|r| r.path.clone()).collect();
     let config_path = state
         .config_path
         .as_ref()
-        .ok_or_else(|| ErrorData::internal_error("config path not configured for sync", None))?;
+        .ok_or_else(|| ErrorData::invalid_params(GENERIC_REQUEST_DENIAL, None))?;
 
     let full = args
         .as_ref()
@@ -846,13 +811,20 @@ async fn handle_sync(
 
 async fn handle_status(
     state: &ServerState,
-    _args: Option<serde_json::Map<String, Value>>,
+    args: Option<serde_json::Map<String, Value>>,
+    principal: &Principal,
 ) -> Result<CallToolResult, McpError> {
+    let tenant = resolve_authorized_tenant(principal, args.as_ref())
+        .map_err(|_| ErrorData::invalid_params(GENERIC_REQUEST_DENIAL, None))?;
     let fp = state.fingerprint.as_ref();
+    let search_engine_ready = state
+        .search_engine
+        .as_ref()
+        .is_some_and(|manager| manager.get_engine(&tenant).is_some());
     Ok(CallToolResult::success(vec![ContentBlock::text(
         serde_json::json!({
             "fingerprint": fp.map(|f| format!("{:?}", f)),
-            "search_engine_ready": state.search_engine.is_some(),
+            "search_engine_ready": search_engine_ready,
         })
         .to_string(),
     )]))
@@ -1052,7 +1024,10 @@ fn sync_tool_schema() -> Tool {
 
 fn status_tool_schema() -> Tool {
     #[derive(Serialize, schemars::JsonSchema)]
-    struct StatusArgs {}
+    struct StatusArgs {
+        /// Authorized tenant selector; omitted only for a single-bound principal.
+        tenant_id: Option<String>,
+    }
     let input_schema = schema_for_type::<StatusArgs>();
     Tool::new(
         "status",
@@ -1378,20 +1353,29 @@ mod tenant_authz_tests {
     /// A payload tenant_id selects among authorized tenants; it can never grant
     /// access to an unbound tenant, and omission defers to the handler.
     #[test]
-    fn payload_tenant_id_is_selector_never_grant() {
+    fn tenant_resolution_is_selector_never_grant() {
         let principal = principal_bound_to("flux-a");
         let mut other = args();
         other.insert("tenant_id".into(), "flux-b".into());
         let mut ghost = args();
         ghost.insert("tenant_id".into(), "ghost".into());
 
-        assert!(payload_tenant_authorized(&principal, None));
-        assert!(!payload_tenant_authorized(&principal, Some(&other)));
-        assert!(!payload_tenant_authorized(&principal, Some(&ghost)));
+        assert_eq!(
+            resolve_authorized_tenant(&principal, None).unwrap(),
+            "flux-a"
+        );
+        assert!(resolve_authorized_tenant(&principal, Some(&other)).is_err());
+        assert!(resolve_authorized_tenant(&principal, Some(&ghost)).is_err());
         // Payload authorization does not depend on the caller's tool or role.
         let mut own = args();
         own.insert("tenant_id".into(), "flux-a".into());
-        assert!(payload_tenant_authorized(&principal, Some(&own)));
+        assert_eq!(
+            resolve_authorized_tenant(&principal, Some(&own)).unwrap(),
+            "flux-a"
+        );
+        let mut malformed = args();
+        malformed.insert("tenant_id".into(), Value::Null);
+        assert!(resolve_authorized_tenant(&principal, Some(&malformed)).is_err());
     }
 
     /// Search against an unknown tenant fails before storage access with a
@@ -1411,12 +1395,16 @@ mod tenant_authz_tests {
 
         let mut ghost = args();
         ghost.insert("tenant_id".into(), "ghost".into());
-        let err = handle_search(&state, Some(ghost)).await.unwrap_err();
+        let err = handle_search(&state, Some(ghost), &principal_bound_to("flux-a"))
+            .await
+            .unwrap_err();
         assert_generic_denial(&err.message);
 
         // Authorized tenant with no payload tenant_id fails closed on missing
         // arguments rather than silently degrading.
-        let err = handle_search(&state, None).await.unwrap_err();
+        let err = handle_search(&state, None, &principal_bound_to("flux-a"))
+            .await
+            .unwrap_err();
         assert_generic_denial(&err.message);
     }
 
@@ -1450,14 +1438,17 @@ mod tenant_authz_tests {
     #[test]
     fn attach_gate_denies_cross_tenant() {
         let principal_a = principal_bound_to("flux-a");
-        assert!(!payload_tenant_authorized(
-            &principal_a,
-            Some(&{
-                let mut a = args();
-                a.insert("tenant_id".into(), "flux-b".into());
-                a
-            })
-        ));
+        assert!(
+            resolve_authorized_tenant(
+                &principal_a,
+                Some(&{
+                    let mut a = args();
+                    a.insert("tenant_id".into(), "flux-b".into());
+                    a
+                })
+            )
+            .is_err()
+        );
         // Denial text for attach stays generic ("document unavailable").
         assert_generic_denial("document unavailable");
     }
@@ -1474,7 +1465,9 @@ mod tenant_authz_tests {
             folder_roots: HashMap::new(),
             processed_index: Arc::new(RwLock::new(HashMap::new())),
         };
-        let result = handle_status(&state, Some(args())).await.unwrap();
+        let result = handle_status(&state, Some(args()), &principal_bound_to("flux-a"))
+            .await
+            .unwrap();
         let text: String = result
             .content
             .iter()
