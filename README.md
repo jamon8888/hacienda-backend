@@ -21,8 +21,10 @@ and making the TypeScript extension a recovery boundary.
 ## Status and current gaps
 
 **This workspace is a scaffold and is not production-compliant.** The shipped implementation has direct
-Rust MCP over stdio/HTTP, raw-capable `rehydrate` and owner-fallback paths, fixed-key/dev custody,
-stdout/`--yes` behavior, incomplete folder-sync/index durability, no authoritative token-only transcript,
+Rust MCP over stdio/HTTP with a closed, no-`rehydrate` manifest (unadvertised tool calls are rejected
+before arguments are inspected), CLI rehydration only as a controlled migration/recovery fallback
+(interactive owner approval, file-only output, unattended `--yes` rejected), fixed-key/dev custody,
+incomplete folder-sync/index durability, no authoritative token-only transcript,
 no complete egress validator, and no verified client parity. HumanDisclosure, the stateful gateway, and
 durable production index/recovery semantics remain to be implemented. These are gaps, not supported
 production behavior.

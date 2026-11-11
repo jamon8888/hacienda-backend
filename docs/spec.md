@@ -150,11 +150,12 @@ engine-era fingerprint.
 
 Each epic gets sliced in its own session (`/to-tickets`) against this spec.
 
-The workspace is not yet production-compliant: raw MCP rehydrate, implicit owner fallback, fixed-key custody,
-stdout/`--yes` assumptions, disconnected folder sync, unfiltered audit arguments, missing proxy-owned MCP,
+The workspace is not yet production-compliant: fixed-key custody, disconnected folder sync, unfiltered audit arguments, missing proxy-owned MCP,
 non-canonical/raw transcript or ordinary client history, absent final egress validation, and the unimplemented
 ADR-0005 HumanDisclosure sidecar/viewer (including user-presence approval and secure-viewer isolation) remain
-implementation gaps. These are current behavior, not the normative target. Stock Claude Code and a transparent
+implementation gaps. Raw MCP rehydration is removed (issue #19): the manifest is closed and unadvertised
+tool calls fail before argument inspection; CLI rehydration is an interactive, file-only migration/recovery
+fallback. These are current behavior, not the normative target. Stock Claude Code and a transparent
 proxy do not satisfy the target without the explicitly controlled wrapper/mod and stateful gateway.
 
 ## 10. Open questions (deferred deliberately)
@@ -187,4 +188,4 @@ Plugins/mods are UX and onboarding only, packaged as `bin/hacienda` plus `.mcp.j
 
 ADR-0008 proposes a SQLite hash-chain, Ed25519 metadata-only evidence ledger with signed epochs, optional RFC3161 TSA/Sigstore Rekor anchors, signed audit-pack export, offline verification, legal hold/retention, and seeded no-PII-invariant tests. Records contain only fingerprints, hashes, counts, and classes—not raw arguments, values, tokens, maps, snapshots, or content. It proves integrity of traffic that passed through the gateway/MCP gate, not host compromise; stronger isolation is required for that threat.
 
-Current gaps remain: raw rehydrate, owner fallback, fixed key, folder-sync bypass, in-memory index, stdout pollution, HTTP stubs, audit raw arguments, and no gateway, local UI, MCP gate, or ledger. These are not claims of completion.
+Current gaps remain: fixed key, folder-sync bypass, in-memory index, HTTP stubs, audit raw arguments, and no gateway, local UI, MCP gate, or ledger. Raw rehydrate, the owner fallback on agent-facing paths, and stdout pollution were removed in issue #19. These are not claims of completion.

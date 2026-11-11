@@ -17,9 +17,9 @@ Gaze is the exclusive ingestion/redaction boundary for documents and other conte
 |---|---|---|
 | Boundary | Stateful proxy/gateway with session, tenant, policy, transcript, and egress enforcement | Direct Rust MCP over stdio/HTTP; no production stateful gateway |
 | Transcript | Durable authoritative token-only transcript | No authoritative durable token-only transcript |
-| MCP and egress | Token-only MCP plus final egress validator | `rehydrate` exists; raw-capable paths and no complete egress validator |
+| MCP and egress | Token-only MCP plus final egress validator | No `rehydrate` tool; closed manifest enforced at dispatch and HTTP; no complete egress validator |
 | Ingestion and indexes | Gaze-only ingestion and durable fingerprint-bound indexes | Gaze/index projection exists; folder sync and index persistence/rebuild are incomplete |
-| Human disclosure | HumanDisclosure sidecar/viewer with independent owner/user-presence approval | Not shipped; owner fallback and stdout remain |
+| Human disclosure | HumanDisclosure sidecar/viewer with independent owner/user-presence approval | Not shipped; CLI migration/recovery fallback only (interactive approval, file-only output) |
 | Clients | Parity across Claude Code, Codex, CLI, and supported adapters | Direct clients work only through existing transports; parity is unverified |
 
 ## Explicit non-goals
@@ -334,7 +334,8 @@ The following are shipped-implementation gaps against the target; they are not a
 
 - [ ] Stateful proxy/gateway with authenticated session/tenant/policy state and protocol-independent client boundary.
 - [ ] Authoritative durable token-only transcript, retention/checkpoint/replay rules, and final egress validator.
-- [ ] Remove raw MCP `rehydrate`, implicit owner fallback, fixed-key custody, stdout/`--yes` assumptions, and unfiltered audit arguments.
+- [x] Remove raw MCP `rehydrate` (closed manifest, enforced before argument inspection at dispatch and HTTP) and CLI stdout/`--yes` assumptions (interactive owner approval, file-only output, unattended `--yes` rejected).
+- [ ] Remove remaining implicit owner fallback, fixed-key custody, and unfiltered audit arguments.
 - [ ] Durable fingerprint-bound BM25/vector/lexical indexes with crash-safe commits, rebuild, and recovery; current folder sync/index state is incomplete.
 - [ ] HumanDisclosure sidecar/viewer, independent user-presence approval, and viewer isolation (ADR-0005); it must not be implemented through MCP.
 - [ ] Client parity tests and enforcement for Claude Code, Codex, CLI, and supported adapters.
