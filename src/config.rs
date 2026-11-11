@@ -882,8 +882,8 @@ mod tenant_path_tests {
 
     impl TempDir {
         fn new(label: &str) -> Self {
-            let dir = std::env::temp_dir()
-                .join(format!("hacienda-cfg-{}-{}", label, std::process::id()));
+            let dir =
+                std::env::temp_dir().join(format!("hacienda-cfg-{}-{}", label, std::process::id()));
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).unwrap();
             Self(dir)
@@ -896,7 +896,10 @@ mod tenant_path_tests {
         }
     }
 
-    fn config_with_tenant(tenant_id: &str, custom_dirs: Option<(&str, &str, &str)>) -> HaciendaConfig {
+    fn config_with_tenant(
+        tenant_id: &str,
+        custom_dirs: Option<(&str, &str, &str)>,
+    ) -> HaciendaConfig {
         let dirs_block = match custom_dirs {
             Some((lance, tantivy, vault)) => format!(
                 "lance_dir = \"{lance}\"\ntantivy_dir = \"{tantivy}\"\nvault_dir = \"{vault}\"\n"
@@ -971,7 +974,11 @@ mod tenant_path_tests {
         std::fs::create_dir_all(&c).unwrap();
         let config = config_with_tenant(
             "t-a",
-            Some((a.to_str().unwrap(), b.to_str().unwrap(), c.to_str().unwrap())),
+            Some((
+                a.to_str().unwrap(),
+                b.to_str().unwrap(),
+                c.to_str().unwrap(),
+            )),
         );
         assert_eq!(config.lance_dir(Some("t-a")), a);
         assert_eq!(config.tantivy_dir(Some("t-a")), b);

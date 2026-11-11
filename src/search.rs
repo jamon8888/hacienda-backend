@@ -1148,8 +1148,11 @@ mod tenant_path_tests {
     #[cfg(feature = "basemind")]
     impl TempDir {
         fn new(label: &str) -> Self {
-            let dir =
-                std::env::temp_dir().join(format!("hacienda-srch-{}-{}", label, std::process::id()));
+            let dir = std::env::temp_dir().join(format!(
+                "hacienda-srch-{}-{}",
+                label,
+                std::process::id()
+            ));
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).unwrap();
             Self(dir)
@@ -1172,8 +1175,14 @@ mod tenant_path_tests {
         config.tenants.push(extra_tenant("slice-b"));
         let manager = TenantSearchEngineManager::new(config).await.unwrap();
 
-        assert_eq!(manager.get_engine("slice-a").unwrap().tenant_id(), "slice-a");
-        assert_eq!(manager.get_engine("slice-b").unwrap().tenant_id(), "slice-b");
+        assert_eq!(
+            manager.get_engine("slice-a").unwrap().tenant_id(),
+            "slice-a"
+        );
+        assert_eq!(
+            manager.get_engine("slice-b").unwrap().tenant_id(),
+            "slice-b"
+        );
         // An unknown tenant never mints an engine; the surface fails closed
         // before any storage access and reports a generic denial.
         assert!(manager.get_engine("ghost").is_none());
@@ -1216,7 +1225,9 @@ mod tenant_path_tests {
         config.tenants.push(tenant_default);
 
         // Open ONLY tenant A's engine (exactly where `new_for_tenant` is the fix).
-        let _engine = SearchEngine::new_for_tenant(&config, "slice-a").await.unwrap();
+        let _engine = SearchEngine::new_for_tenant(&config, "slice-a")
+            .await
+            .unwrap();
 
         assert!(
             dir_a.exists(),
@@ -1233,4 +1244,3 @@ mod tenant_path_tests {
         }
     }
 }
-

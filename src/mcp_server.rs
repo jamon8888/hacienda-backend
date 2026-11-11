@@ -717,7 +717,10 @@ fn payload_tenant_authorized(
     principal: &Principal,
     args: Option<&serde_json::Map<String, Value>>,
 ) -> bool {
-    match args.and_then(|a| a.get("tenant_id")).and_then(|v| v.as_str()) {
+    match args
+        .and_then(|a| a.get("tenant_id"))
+        .and_then(|v| v.as_str())
+    {
         Some(tenant) => principal.tenant_ids.contains(tenant),
         None => true,
     }
@@ -1236,7 +1239,8 @@ async fn healthz() -> Json<Value> {
 }
 
 #[cfg(test)]
-mod authz_manifest_tests {    use super::*;
+mod authz_manifest_tests {
+    use super::*;
     use std::collections::HashSet;
 
     #[test]
@@ -1318,9 +1322,10 @@ mod tenant_authz_tests {
     }
 
     fn test_config() -> HaciendaConfig {
-        let mut config: HaciendaConfig =
-            toml::from_str("default_tenant = \"flux-a\"\n[[tenants]]\ntenant_id = \"flux-a\"\nname = \"a\"\n")
-                .unwrap();
+        let mut config: HaciendaConfig = toml::from_str(
+            "default_tenant = \"flux-a\"\n[[tenants]]\ntenant_id = \"flux-a\"\nname = \"a\"\n",
+        )
+        .unwrap();
         config.tenants.push(extra_tenant("flux-b"));
         config
     }
@@ -1381,10 +1386,7 @@ mod tenant_authz_tests {
         ghost.insert("tenant_id".into(), "ghost".into());
 
         assert!(payload_tenant_authorized(&principal, None));
-        assert!(!payload_tenant_authorized(
-            &principal,
-            Some(&other)
-        ));
+        assert!(!payload_tenant_authorized(&principal, Some(&other)));
         assert!(!payload_tenant_authorized(&principal, Some(&ghost)));
         // Payload authorization does not depend on the caller's tool or role.
         let mut own = args();

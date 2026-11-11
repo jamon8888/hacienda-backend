@@ -242,7 +242,10 @@ mod cli_auth_tests {
         for principal in ["owner", "ambidextrous"] {
             let err = cli_auth_for(&config, principal, Some("ghost")).unwrap_err();
             let message = err.to_string();
-            assert!(message.contains("not bound"), "unexpected denial: {message}");
+            assert!(
+                message.contains("not bound"),
+                "unexpected denial: {message}"
+            );
             assert!(!message.contains("core-a"));
             assert!(!message.contains("core-b"));
             assert!(!message.contains("ghost"));
@@ -255,7 +258,9 @@ mod cli_auth_tests {
     fn resolved_tenant_stays_within_principal_authorization() {
         let config = config_with_principals();
         assert_eq!(
-            cli_auth_for(&config, "owner", Some("core-a")).unwrap().tenant_id,
+            cli_auth_for(&config, "owner", Some("core-a"))
+                .unwrap()
+                .tenant_id,
             "core-a"
         );
         assert_eq!(
