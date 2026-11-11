@@ -53,11 +53,11 @@ pub struct RehydrateArgs {
     #[arg(long, short = 'v', required = true)]
     pub vault_map: PathBuf,
 
-    /// Path to the gaze manifest file (optional, for audit context).
+    /// Path to the gaze manifest file (required, for independent binding verification).
     #[arg(long, short = 'm')]
     pub manifest: Option<PathBuf>,
 
-    /// Output path for rehydrated content (stdout if omitted).
+    /// Output path for rehydrated content (required; stdout is never used for raw values).
     #[arg(long, short = 'o')]
     pub output: Option<PathBuf>,
 

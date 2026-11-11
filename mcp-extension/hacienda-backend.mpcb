@@ -56,6 +56,18 @@
         "inputSchema": { "type": "object", "properties": {} }
       },
       {
+        "name": "attach_local_doc",
+        "description": "Attach a previously processed local document and return an opaque clean reference.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "tenant_id": { "type": "string" },
+            "path": { "type": "string" }
+          },
+          "required": ["tenant_id", "path"]
+        }
+      },
+      {
         "name": "graph_entities",
         "description": "Read-only Cypher query over the tenant's entity graph (GLiNER mentions + co-occurrence). Only MATCH, RETURN, WHERE, LIMIT, ORDER BY, WITH, UNION are allowed.",
         "inputSchema": {

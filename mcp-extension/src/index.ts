@@ -69,18 +69,12 @@ const TOOLS = [
   },
   {
     name: "attach_local_doc",
-    description: "Attach a local document through the backend disclosure policy.",
-    inputSchema: { type: "object", properties: { path: { type: "string" } }, required: ["path"] },
-  },
-  {
-    name: "request_human_disclosure",
-    description: "Request human approval for a disclosure operation.",
-    inputSchema: { type: "object", properties: { request_id: { type: "string" } }, required: ["request_id"] },
-  },
-  {
-    name: "disclosure_status",
-    description: "Return disclosure approval status metadata.",
-    inputSchema: { type: "object", properties: { request_id: { type: "string" } } },
+    description: "Attach a previously processed local document and return an opaque clean reference.",
+    inputSchema: {
+      type: "object",
+      properties: { tenant_id: { type: "string" }, path: { type: "string" } },
+      required: ["tenant_id", "path"],
+    },
   },
   {
     name: "graph_entities",
@@ -92,14 +86,15 @@ const TOOLS = [
     description: "GraphRAG retrieval; returns tokenized snippets and metadata only.",
     inputSchema: { type: "object", properties: { tenant_id: { type: "string" }, query: { type: "string" }, hops: { type: "number" }, max_results: { type: "number" } }, required: ["tenant_id", "query"] },
   },
-];
+] as const;
 
-const TOOL_NAMES = new Set(TOOLS.map((tool) => tool.name));
+const TOOL_NAMES = new Set<string>(TOOLS.map((tool) => tool.name));
 
 const RESOURCES = [
   { uri: "basemind://status", name: "System Status", description: "Status metadata", mimeType: "application/json" },
   { uri: "basemind://repo/map", name: "Repository Map", description: "Repository metadata", mimeType: "application/json" },
-];
+] as const;
+const RESOURCE_URIS = new Set<string>(RESOURCES.map((resource) => resource.uri));
 
 let backendClient: Client | undefined;
 let backendTransport: StdioClientTransport | StreamableHTTPClientTransport | undefined;
@@ -157,12 +152,19 @@ async function main(): Promise<void> {
   server.setRequestHandler(ListResourcesRequestSchema, async () => ({ resources: RESOURCES }));
 
   server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
+    const resource = RESOURCES.find(({ uri }) => uri === request.params.uri);
+    if (!resource || !RESOURCE_URIS.has(resource.uri)) {
+      return {
+        contents: [{ uri: "hacienda://error", mimeType: "text/plain", text: "E_RESOURCE_NOT_ALLOWED" }],
+        isError: true,
+      };
+    }
     try {
-      const result = await (await getBackendClient()).readResource({ uri: request.params.uri });
+      const result = await (await getBackendClient()).readResource({ uri: resource.uri });
       const metadata = safeResult(result);
-      return { contents: [{ uri: request.params.uri, mimeType: "application/json", text: JSON.stringify(metadata) }] };
+      return { contents: [{ uri: resource.uri, mimeType: "application/json", text: JSON.stringify(metadata) }] };
     } catch {
-      return { contents: [{ uri: request.params.uri, mimeType: "text/plain", text: "E_RESOURCE_FAILED" }] };
+      return { contents: [{ uri: resource.uri, mimeType: "text/plain", text: "E_RESOURCE_FAILED" }], isError: true };
     }
   });
 

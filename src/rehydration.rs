@@ -14,7 +14,7 @@ use zeroize::Zeroize;
 const LEGACY_XPII_MAGIC: &[u8] = b"XPII\x01";
 
 /// Errors from rehydration operations.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, PartialEq)]
 pub enum RehydrationError {
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
@@ -189,7 +189,9 @@ pub async fn run_rehydrate(
     if args.output.is_none() {
         return Err(RehydrationError::UserCancelled);
     }
-    if args.yes && !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+    // Interactive owner approval is mandatory: an unattended run is rejected
+    // before any vault material is read, whether or not --yes was passed.
+    if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
         return Err(RehydrationError::UserCancelled);
     }
     let manifest_path = args.manifest.as_ref().ok_or_else(|| {
@@ -255,12 +257,13 @@ pub async fn run_export_recovery(
     if !binding.authorizes(tenant_id) {
         return Err(RehydrationError::UnauthorizedTenant);
     }
-    let manifest_bytes = load_manifest(&args.manifest)?;
-    let vault_map = load_vault_map_verified(&args.vault_map, &args.manifest, None, provider)?;
-
+    // Interactive owner approval is mandatory; fail closed before reading
+    // any manifest or vault material.
     if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
         return Err(RehydrationError::UserCancelled);
     }
+    let manifest_bytes = load_manifest(&args.manifest)?;
+    let vault_map = load_vault_map_verified(&args.vault_map, &args.manifest, None, provider)?;
     if !confirm_rehydration("recovery export", false)? {
         return Err(RehydrationError::UserCancelled);
     }

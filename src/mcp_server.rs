@@ -59,6 +59,16 @@ impl ToolRegistry {
         self.capabilities.push(capability);
     }
 
+    /// Return every tool in the closed server manifest.
+    pub fn registered_tools(&self) -> Vec<Tool> {
+        self.tools.clone()
+    }
+
+    /// Check the closed manifest before inspecting request arguments.
+    pub fn contains(&self, name: &str) -> bool {
+        self.tools.iter().any(|tool| tool.name == name)
+    }
+
     /// Get tools available to a principal.
     pub fn available_tools(&self, principal: &Principal) -> Vec<Tool> {
         self.tools
@@ -170,6 +180,11 @@ where
         self
     }
 
+    /// Return the closed tool manifest after capability filtering.
+    pub async fn advertised_tools(&self, principal: &Principal) -> Vec<Tool> {
+        self.state.registry.read().await.available_tools(principal)
+    }
+
     /// Attach audit log for WORM audit trail.
     pub fn with_audit_log(mut self, audit_log: Arc<AuditLog>) -> Self {
         self.state.audit_log = Some(audit_log);
@@ -246,6 +261,13 @@ where
             })
             .await
             .map_err(|_| ErrorData::invalid_request("authentication required", None))?;
+
+        // Reject unknown tools before reading arguments. This keeps direct
+        // stdio/HTTP attempts at the closed-manifest boundary and prevents an
+        // unadvertised raw-value path from reaching authorization or handlers.
+        if !self.state.registry.read().await.contains(&request.name) {
+            return Err(ErrorData::method_not_found::<CallToolRequestMethod>());
+        }
 
         // Capability check (registry already filters, but double-check here).
         // Tenant IDs in payloads are selectors only; authorization comes solely
@@ -1038,7 +1060,7 @@ fn status_tool_schema() -> Tool {
     let input_schema = schema_for_type::<StatusArgs>();
     Tool::new(
         "status",
-        "Index status: fingerprint, engine readiness, rehydration readiness.",
+        "Index status: fingerprint and engine readiness.",
         input_schema,
     )
     .with_annotations(
@@ -1196,12 +1218,28 @@ fn parse_search_params(
 
 /// HTTP handlers
 async fn mcp_handler<R>(
-    State((_state, _resolver)): State<(ServerState, Arc<R>)>,
-    axum::extract::Json(_request): axum::extract::Json<Value>,
+    State((state, _resolver)): State<(ServerState, Arc<R>)>,
+    axum::extract::Json(request): axum::extract::Json<Value>,
 ) -> Result<Json<Value>, axum::http::StatusCode>
 where
     R: PrincipalResolver + Send + Sync + 'static,
 {
+    if request.get("method").and_then(Value::as_str) == Some("tools/call") {
+        let name = request
+            .get("params")
+            .and_then(|params| params.get("name"))
+            .and_then(Value::as_str);
+        let known = match name {
+            Some(name) => state.registry.read().await.contains(name),
+            None => false,
+        };
+        if !known {
+            // Do not echo the request or its arguments. In particular, an
+            // unadvertised rehydration attempt must not get a vault-map value
+            // back through an HTTP error body or log line.
+            return Err(axum::http::StatusCode::BAD_REQUEST);
+        }
+    }
     warn!("MCP HTTP handler not fully implemented — use stdio transport");
     Err(axum::http::StatusCode::NOT_IMPLEMENTED)
 }
@@ -1232,6 +1270,8 @@ mod authz_manifest_tests {
         registry.register(sync_tool_schema(), Capability::Sync);
         registry.register(status_tool_schema(), Capability::Status);
         registry.register(attach_local_doc_tool_schema(), Capability::AttachLocalDoc);
+        registry.register(graph_entities_tool_schema(), Capability::GraphRag);
+        registry.register(graph_rag_tool_schema(), Capability::GraphRag);
         let principal = Principal {
             id: "p".into(),
             name: "p".into(),
@@ -1240,6 +1280,7 @@ mod authz_manifest_tests {
                 Capability::Sync,
                 Capability::Status,
                 Capability::AttachLocalDoc,
+                Capability::GraphRag,
             ],
             tenant_ids: HashSet::from(["t".into()]),
         };
@@ -1252,9 +1293,38 @@ mod authz_manifest_tests {
         assert!(names.contains("sync"));
         assert!(names.contains("status"));
         assert!(names.contains("attach_local_doc"));
-        for absent in ["rehydrate", "request_human_disclosure", "disclosure_status"] {
-            assert!(!names.contains(absent));
+        assert!(names.contains("graph_entities"));
+        assert!(names.contains("graph_rag"));
+        assert_eq!(names.len(), 6);
+        assert!(!registry.contains("rehydrate"));
+        assert!(!registry.contains("vault"));
+
+        for tool in registry.registered_tools() {
+            let description = tool.description.as_deref().unwrap_or_default();
+            assert!(!description.contains("rehydrat"));
+            assert!(!description.contains("vault"));
         }
+    }
+
+    #[tokio::test]
+    async fn http_rejects_unadvertised_rehydration_without_echoing_arguments() {
+        let server = McpServer::new(crate::mcp_resolver::DefaultResolver::new());
+        let state = server.state;
+        let request = serde_json::json!({
+            "method": "tools/call",
+            "params": {
+                "name": "rehydrate",
+                "arguments": {"vault_map": "SEEDED_VAULT_VALUE"}
+            }
+        });
+
+        let result = mcp_handler(
+            State((state, Arc::new(crate::mcp_resolver::DefaultResolver::new()))),
+            Json(request),
+        )
+        .await;
+
+        assert!(matches!(result, Err(axum::http::StatusCode::BAD_REQUEST)));
     }
 
     #[test]

@@ -1,6 +1,6 @@
 # Hacienda Backend MCP Extension for Claude Desktop
 
-This extension provides MCP (Model Context Protocol) integration for the hacienda-backend binary, enabling Claude Desktop to access code navigation, document retrieval, git intelligence, memory, and agent coordination capabilities.
+This extension provides a closed-manifest MCP integration for the hacienda-backend binary. It exposes tokenized search, index controls, opaque processed-document references, and optional graph retrieval.
 
 > This extension exposes tokenized snippets and metadata only. It does not provide raw rehydration or a recovery path.
 
@@ -70,9 +70,7 @@ Then add to Claude Desktop config:
 | `search` | Hybrid search (BM25 + Vector + Lexical + RRF) over indexed documents |
 | `sync` | Trigger incremental or full index rebuild |
 | `status` | Index status and engine readiness metadata |
-| `attach_local_doc` | Attach a local document through the disclosure policy |
-| `request_human_disclosure` | Request human approval for disclosure |
-| `disclosure_status` | Disclosure approval status metadata |
+| `attach_local_doc` | Attach a previously processed local document and return an opaque clean reference |
 | `graph_entities` | Read-only Cypher query over the entity graph |
 | `graph_rag` | GraphRAG: hybrid retrieval via entity graph expansion |
 

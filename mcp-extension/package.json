@@ -18,35 +18,19 @@
   "mcp": {
     "name": "hacienda-backend",
     "version": "0.1.0",
-    "description": "Code navigation, document retrieval, git intelligence, memory, and agent coordination over MCP",
-    "capabilities": [
-      "code-navigation",
-      "document-retrieval",
-      "git-intelligence",
-      "memory",
-      "agent-coordination",
-      "graphrag"
-    ],
+    "description": "Closed-manifest MCP access to tokenized search, sync, status, document references, and optional graph retrieval",
+    "capabilities": ["tools", "resources"],
     "tools": [
-      "code",
-      "graph",
-      "git",
-      "memory",
-      "admin",
-      "web",
-      "agents",
-      "workspace",
-      "shell",
-      "vault",
-      "redact_text",
+      "search",
+      "sync",
+      "status",
+      "attach_local_doc",
       "graph_entities",
       "graph_rag"
     ],
     "resources": [
       "basemind://status",
-      "basemind://repo/map",
-      "basemind://outline/{path}",
-      "basemind://memory/{key}"
+      "basemind://repo/map"
     ]
   },
   "engines": {

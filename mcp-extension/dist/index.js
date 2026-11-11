@@ -1,11 +1,14 @@
 "use strict";
 /**
- * Hacienda Backend MCP Extension for Claude Desktop
- * Bridges MCP requests to the hacienda-backend binary.
+ * Hacienda Backend MCP Extension for Claude Desktop.
+ * Bridges the extension-facing MCP server to hacienda's MCP server transport.
  */
 Object.defineProperty(exports, "__esModule", { value: true });
-const index_js_1 = require("@modelcontextprotocol/sdk/server/index.js");
-const stdio_js_1 = require("@modelcontextprotocol/sdk/server/stdio.js");
+const index_js_1 = require("@modelcontextprotocol/sdk/client/index.js");
+const stdio_js_1 = require("@modelcontextprotocol/sdk/client/stdio.js");
+const streamableHttp_js_1 = require("@modelcontextprotocol/sdk/client/streamableHttp.js");
+const index_js_2 = require("@modelcontextprotocol/sdk/server/index.js");
+const stdio_js_2 = require("@modelcontextprotocol/sdk/server/stdio.js");
 const types_js_1 = require("@modelcontextprotocol/sdk/types.js");
 const child_process_1 = require("child_process");
 const path_1 = require("path");
@@ -19,13 +22,15 @@ function findBinary() {
     ];
     for (const candidate of candidates) {
         try {
-            const result = (0, child_process_1.spawnSync)(candidate, ["--version"], { encoding: "utf-8" });
-            if (result.status === 0) {
+            const result = (0, child_process_1.spawnSync)(candidate, ["--version"], {
+                encoding: "utf-8",
+                stdio: ["ignore", "pipe", "pipe"],
+            });
+            if (result.status === 0)
                 return candidate;
-            }
         }
         catch {
-            // keep searching
+            // Keep searching without exposing subprocess diagnostics.
         }
     }
     return "hacienda-backend";
@@ -34,162 +39,124 @@ const BINARY_PATH = findBinary();
 const TOOLS = [
     {
         name: "search",
-        description: "Hybrid search (BM25 + Vector + Lexical + RRF) over indexed documents. Returns snippets with gaze tokens (e.g., <4b31c7ee:Name_1>) - no PII exposed. Use rehydrate tool (owner-only) to recover originals.",
+        description: "Search indexed documents; returns tokenized snippets and metadata only.",
         inputSchema: {
             type: "object",
             properties: {
-                tenant_id: { type: "string", description: "Tenant identifier (isolation key)" },
-                query: { type: "string", description: "Search query" },
+                tenant_id: { type: "string" },
+                query: { type: "string" },
                 top_k: { type: "number", default: 10, minimum: 1, maximum: 100 },
                 rerank: { type: "boolean", default: true },
-                filter: {
-                    type: "object",
-                    properties: {
-                        connector: { type: "string" },
-                        since: { type: "string", format: "date-time" },
-                    },
-                },
+                filter: { type: "object" },
             },
             required: ["tenant_id", "query"],
-        },
-    },
-    {
-        name: "rehydrate",
-        description: "Rehydrate a single gaze gateway token to its original PII value. Owner-only capability, audited.",
-        inputSchema: {
-            type: "object",
-            properties: {
-                tenant_id: { type: "string", description: "Tenant identifier" },
-                entity: {
-                    type: "string",
-                    description: "Gaze gateway token to rehydrate (e.g., '<4b31c7ee:Name_1>')",
-                },
-            },
-            required: ["tenant_id", "entity"],
         },
     },
     {
         name: "sync",
-        description: "Trigger incremental or full index rebuild.",
-        inputSchema: {
-            type: "object",
-            properties: {
-                full: { type: "boolean", default: false },
-            },
-        },
+        description: "Trigger an incremental or full index rebuild.",
+        inputSchema: { type: "object", properties: { full: { type: "boolean", default: false } } },
     },
     {
         name: "status",
-        description: "Index status: fingerprint, engine readiness, rehydration readiness.",
+        description: "Return index and engine status metadata.",
         inputSchema: { type: "object", properties: {} },
     },
     {
-        name: "graph_entities",
-        description: "Read-only Cypher query over the tenant's entity graph (GLiNER mentions + co-occurrence). Only MATCH, RETURN, WHERE, LIMIT, ORDER BY, WITH, UNION are allowed.",
+        name: "attach_local_doc",
+        description: "Attach a previously processed local document and return an opaque clean reference.",
         inputSchema: {
             type: "object",
-            properties: {
-                tenant_id: { type: "string", description: "Tenant identifier (isolation key)" },
-                cypher: { type: "string", description: "Read-only Cypher query string" },
-                max_rows: { type: "number", default: 200, minimum: 1, maximum: 1000 },
-            },
-            required: ["tenant_id", "cypher"],
+            properties: { tenant_id: { type: "string" }, path: { type: "string" } },
+            required: ["tenant_id", "path"],
         },
+    },
+    {
+        name: "graph_entities",
+        description: "Read-only entity graph query; returns tokenized metadata only.",
+        inputSchema: { type: "object", properties: { tenant_id: { type: "string" }, cypher: { type: "string" }, max_rows: { type: "number" } }, required: ["tenant_id", "cypher"] },
     },
     {
         name: "graph_rag",
-        description: "GraphRAG: hybrid retrieval via entity graph expansion (vector lane + graph lane + fusion). Requires documents.embed = true.",
-        inputSchema: {
-            type: "object",
-            properties: {
-                tenant_id: { type: "string", description: "Tenant identifier (isolation key)" },
-                query: { type: "string", description: "Natural language query to embed and expand" },
-                hops: { type: "number", default: 2, minimum: 1, maximum: 2 },
-                max_results: { type: "number", default: 50, minimum: 1, maximum: 200 },
-            },
-            required: ["tenant_id", "query"],
-        },
+        description: "GraphRAG retrieval; returns tokenized snippets and metadata only.",
+        inputSchema: { type: "object", properties: { tenant_id: { type: "string" }, query: { type: "string" }, hops: { type: "number" }, max_results: { type: "number" } }, required: ["tenant_id", "query"] },
     },
 ];
+const TOOL_NAMES = new Set(TOOLS.map((tool) => tool.name));
 const RESOURCES = [
-    {
-        uri: "basemind://status",
-        name: "System Status",
-        description: "Current system status and health",
-        mimeType: "application/json",
-    },
-    {
-        uri: "basemind://repo/map",
-        name: "Repository Map",
-        description: "Repository structure and file map",
-        mimeType: "application/json",
-    },
+    { uri: "basemind://status", name: "System Status", description: "Status metadata", mimeType: "application/json" },
+    { uri: "basemind://repo/map", name: "Repository Map", description: "Repository metadata", mimeType: "application/json" },
 ];
-function runBinary(args, timeoutMs) {
-    const result = (0, child_process_1.spawnSync)(BINARY_PATH, args, { encoding: "utf-8", timeout: timeoutMs });
-    if (result.error) {
-        throw new Error(`Failed to execute hacienda-backend: ${result.error.message}`);
-    }
-    if (result.status !== 0) {
-        throw new Error(`Command failed: ${result.stderr || result.stdout}`);
-    }
-    try {
-        return JSON.parse(result.stdout);
-    }
-    catch {
-        return { raw: result.stdout };
-    }
+const RESOURCE_URIS = new Set(RESOURCES.map((resource) => resource.uri));
+let backendClient;
+let backendTransport;
+async function getBackendClient() {
+    if (backendClient)
+        return backendClient;
+    backendClient = new index_js_1.Client({ name: "hacienda-backend-extension", version: "0.1.0" });
+    const endpoint = process.env["HACIENDA_MCP_URL"];
+    backendTransport = endpoint
+        ? new streamableHttp_js_1.StreamableHTTPClientTransport(new URL(endpoint))
+        : new stdio_js_1.StdioClientTransport({
+            command: BINARY_PATH,
+            args: ["mcp", "serve", "--transport", "stdio"],
+            stderr: "pipe",
+        });
+    await backendClient.connect(backendTransport);
+    return backendClient;
+}
+/** Only expose fixed status codes and aggregate metadata; never backend payloads or diagnostics. */
+function safeResult(result, code = "OK") {
+    const value = result;
+    return {
+        code: value?.isError ? "E_BACKEND_TOOL" : code,
+        metadata: {
+            content_items: Array.isArray(value?.content) ? value.content.length : 0,
+            has_structured_content: value?.structuredContent !== undefined,
+        },
+    };
 }
 async function main() {
-    const server = new index_js_1.Server({ name: "hacienda-backend", version: "0.1.0" }, { capabilities: { tools: {}, resources: {} } });
+    const server = new index_js_2.Server({ name: "hacienda-backend", version: "0.1.0" }, { capabilities: { tools: {}, resources: {} } });
     server.setRequestHandler(types_js_1.ListToolsRequestSchema, async () => ({ tools: TOOLS }));
     server.setRequestHandler(types_js_1.CallToolRequestSchema, async (request) => {
-        const { name } = request.params;
-        const toolArgs = (request.params.arguments ?? {});
-        try {
-            const cmdArgs = ["mcp", "call", "--tool", name];
-            for (const [key, value] of Object.entries(toolArgs)) {
-                cmdArgs.push("--arg", key, JSON.stringify(value));
-            }
-            const result = runBinary(cmdArgs, 30000);
-            return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+        if (!TOOL_NAMES.has(request.params.name)) {
+            return { content: [{ type: "text", text: JSON.stringify({ code: "E_TOOL_NOT_ALLOWED" }) }], isError: true };
         }
-        catch (error) {
-            return {
-                content: [
-                    { type: "text", text: `Error: ${error instanceof Error ? error.message : String(error)}` },
-                ],
-                isError: true,
-            };
+        try {
+            const result = await (await getBackendClient()).callTool({
+                name: request.params.name,
+                arguments: request.params.arguments ?? {},
+            });
+            return { content: [{ type: "text", text: JSON.stringify(safeResult(result)) }] };
+        }
+        catch {
+            return { content: [{ type: "text", text: JSON.stringify({ code: "E_TOOL_FAILED" }) }], isError: true };
         }
     });
     server.setRequestHandler(types_js_1.ListResourcesRequestSchema, async () => ({ resources: RESOURCES }));
     server.setRequestHandler(types_js_1.ReadResourceRequestSchema, async (request) => {
-        const { uri } = request.params;
-        try {
-            const result = runBinary(["mcp", "resource", "read", uri], 30000);
+        const resource = RESOURCES.find(({ uri }) => uri === request.params.uri);
+        if (!resource || !RESOURCE_URIS.has(resource.uri)) {
             return {
-                contents: [{ uri, mimeType: "application/json", text: JSON.stringify(result, null, 2) }],
+                contents: [{ uri: "hacienda://error", mimeType: "text/plain", text: "E_RESOURCE_NOT_ALLOWED" }],
+                isError: true,
             };
         }
-        catch (error) {
-            return {
-                contents: [
-                    {
-                        uri,
-                        mimeType: "text/plain",
-                        text: `Error reading resource: ${error instanceof Error ? error.message : String(error)}`,
-                    },
-                ],
-            };
+        try {
+            const result = await (await getBackendClient()).readResource({ uri: resource.uri });
+            const metadata = safeResult(result);
+            return { contents: [{ uri: resource.uri, mimeType: "application/json", text: JSON.stringify(metadata) }] };
+        }
+        catch {
+            return { contents: [{ uri: resource.uri, mimeType: "text/plain", text: "E_RESOURCE_FAILED" }], isError: true };
         }
     });
-    const transport = new stdio_js_1.StdioServerTransport();
-    await server.connect(transport);
+    await server.connect(new stdio_js_2.StdioServerTransport());
     console.error("Hacienda Backend MCP server started");
 }
-main().catch((error) => {
-    console.error("Fatal:", error);
+main().catch(() => {
+    console.error("Fatal: E_SERVER_FAILED");
     process.exit(1);
 });
 //# sourceMappingURL=index.js.map
