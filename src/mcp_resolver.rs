@@ -22,6 +22,13 @@ impl DefaultResolver {
         let binding = config
             .principal(principal_id)
             .ok_or(ResolverError::AuthRequired)?;
+        if binding
+            .tenant_ids
+            .iter()
+            .any(|tenant| !config.has_active_tenant(tenant))
+        {
+            return Err(ResolverError::AuthRequired);
+        }
         let capabilities = match binding.role {
             crate::authz::PrincipalRole::Owner => vec![
                 Capability::Search,

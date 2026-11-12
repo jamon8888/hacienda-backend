@@ -45,13 +45,21 @@ fn cli_auth_for(
 ) -> Result<CliAuthContext, CliError> {
     let binding = config
         .principal(principal_id)
-        .ok_or_else(|| CliError::Other("principal is not bound in configuration".into()))?;
+        .ok_or_else(|| CliError::Other("request unavailable".into()))?;
     let tenant_id = match requested {
         Some(t) if binding.authorizes(t) => t.to_owned(),
-        Some(_) => return Err(CliError::Other("tenant is not bound to principal".into())),
-        None if binding.tenant_ids.len() == 1 => binding.tenant_ids.iter().next().cloned().unwrap(),
-        _ => return Err(CliError::Other("tenant selection is ambiguous".into())),
+        Some(_) => return Err(CliError::Other("request unavailable".into())),
+        None if binding.tenant_ids.len() == 1 => binding
+            .tenant_ids
+            .iter()
+            .find(|tenant| !tenant.is_empty())
+            .cloned()
+            .ok_or_else(|| CliError::Other("request unavailable".into()))?,
+        _ => return Err(CliError::Other("request unavailable".into())),
     };
+    if !config.has_active_tenant(&tenant_id) {
+        return Err(CliError::Other("request unavailable".into()));
+    }
     Ok(CliAuthContext {
         binding: binding.clone(),
         tenant_id,
@@ -165,7 +173,7 @@ async fn run_mcp(args: McpArgs) -> Result<(), CliError> {
         .ok_or_else(|| CliError::Other("--config is required for authenticated MCP".into()))?;
     let config = load_config(&config_path)?;
     let resolver = hacienda_backend::DefaultResolver::from_config(&config, &principal_id)
-        .map_err(|_| CliError::Other("principal is not bound in configuration".into()))?;
+        .map_err(|_| CliError::Other("request unavailable".into()))?;
     let roots = config
         .tenants
         .iter()
@@ -242,10 +250,7 @@ mod cli_auth_tests {
         for principal in ["owner", "ambidextrous"] {
             let err = cli_auth_for(&config, principal, Some("ghost")).unwrap_err();
             let message = err.to_string();
-            assert!(
-                message.contains("not bound"),
-                "unexpected denial: {message}"
-            );
+            assert_eq!(message, "Other error: request unavailable");
             assert!(!message.contains("core-a"));
             assert!(!message.contains("core-b"));
             assert!(!message.contains("ghost"));
@@ -284,6 +289,28 @@ mod cli_auth_tests {
         assert!(cli_auth_for(&config, "ambidextrous", None).is_err());
         assert!(cli_auth_for(&config, "unknown", None).is_err());
         assert!(cli_auth_for(&config, "unknown", Some("core-a")).is_err());
+    }
+
+    #[test]
+    fn binding_to_unknown_or_inactive_tenant_fails_closed() {
+        let config: hacienda_backend::HaciendaConfig = toml::from_str(
+            "default_tenant = \"core-a\"\n\
+             [[tenants]]\ntenant_id = \"core-a\"\nname = \"a\"\n\
+             [[principals]]\nprincipal_id = \"owner\"\nrole = \"owner\"\n\
+             tenant_ids = [\"ghost\"]\n\
+             [[principals]]\nprincipal_id = \"inactive\"\nrole = \"owner\"\n\
+             tenant_ids = [\"core-b\"]\n\
+             [[tenants]]\ntenant_id = \"core-b\"\nname = \"b\"\nactive = false\n",
+        )
+        .unwrap();
+        for principal in ["owner", "inactive"] {
+            let message = cli_auth_for(&config, principal, None)
+                .unwrap_err()
+                .to_string();
+            assert_eq!(message, "Other error: request unavailable");
+            assert!(!message.contains("ghost"));
+            assert!(!message.contains("core-b"));
+        }
     }
 
     /// The CLI argument surface keeps accepting the documented flags.

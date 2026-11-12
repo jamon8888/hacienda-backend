@@ -61,6 +61,12 @@ impl ToolRegistry {
 
     /// Get tools available to a principal.
     pub fn available_tools(&self, principal: &Principal) -> Vec<Tool> {
+        // Every currently registered tool is tenant-scoped. An authenticated
+        // principal with no usable tenant binding must not discover or invoke
+        // a tenant surface through the public manifest.
+        if !principal.tenant_ids.iter().any(|tenant| !tenant.is_empty()) {
+            return Vec::new();
+        }
         self.tools
             .iter()
             .zip(&self.capabilities)
@@ -85,6 +91,8 @@ impl Default for ToolRegistry {
 #[derive(Clone)]
 pub struct ServerState {
     pub registry: Arc<RwLock<ToolRegistry>>,
+    /// Engine-era metadata shared by the process; never returned before the
+    /// requested tenant has been authorized by `handle_status`.
     pub fingerprint: Option<EngineEraFingerprint>,
     /// Hybrid search engine (BM25 + Vector + Lexical + RRF) per tenant.
     pub search_engine: Option<Arc<TenantSearchEngineManager>>,
@@ -247,30 +255,44 @@ where
             .await
             .map_err(|_| ErrorData::invalid_request("authentication required", None))?;
 
-        // Capability check (registry already filters, but double-check here).
-        // Tenant IDs in payloads are selectors only; authorization comes solely
-        // from the authenticated principal binding and fails closed.
-        if !payload_tenant_authorized(&principal, request.arguments.as_ref()) {
-            if request.name == "attach_local_doc" {
-                let tenant = request
-                    .arguments
-                    .as_ref()
-                    .and_then(|a| a.get("tenant_id"))
-                    .and_then(|v| v.as_str());
-                audit_authz(
-                    &self.state,
+        // Resolve the principal-to-tenant binding before capability or resource
+        // checks. Payload tenant IDs are selectors, never grants; rejecting
+        // them first avoids cross-tenant capability and existence oracles.
+        let authorized_tenant =
+            if let Some(allow_implicit_single) = tenant_selection_mode(&request.name) {
+                match resolve_tenant(
                     &principal,
-                    tenant,
-                    "deny",
-                    "tenant_unauthorized",
-                    "ERROR_CODE",
-                )
-                .await
-                .map_err(|_| ErrorData::internal_error("audit unavailable", None))?;
-                return Err(ErrorData::invalid_params("document unavailable", None));
-            }
-            return Err(ErrorData::invalid_params("tenant unauthorized", None));
-        }
+                    request.arguments.as_ref(),
+                    allow_implicit_single,
+                ) {
+                    Ok(tenant) => Some(tenant),
+                    Err(error) => {
+                        if request.name == "attach_local_doc" {
+                            let tenant = request
+                                .arguments
+                                .as_ref()
+                                .and_then(|a| a.get("tenant_id"))
+                                .and_then(|v| v.as_str());
+                            if audit_authz(
+                                &self.state,
+                                &principal,
+                                tenant,
+                                "deny",
+                                "tenant_unauthorized",
+                                "ERROR_CODE",
+                            )
+                            .await
+                            .is_err()
+                            {
+                                return Err(generic_tenant_error());
+                            }
+                        }
+                        return Err(error);
+                    }
+                }
+            } else {
+                None
+            };
         let has_cap = |cap: Capability| principal.capabilities.contains(&cap);
         if request.name == "attach_local_doc" && !has_cap(Capability::AttachLocalDoc) {
             audit_authz(
@@ -300,7 +322,7 @@ where
                 }
                 let args = request.arguments.clone();
                 let start = std::time::Instant::now();
-                let result = handle_search(&self.state, args.clone()).await;
+                let result = handle_search(&self.state, args.clone(), &principal).await;
                 let duration = start.elapsed();
                 let (result_summary, _success) = match &result {
                     Ok(_) => (format!("OK ({}ms)", duration.as_millis()), true),
@@ -318,11 +340,7 @@ where
                                 "blake3:{}",
                                 blake3::hash(principal.id.as_bytes()).to_hex()
                             ),
-                            tenant_id: args
-                                .as_ref()
-                                .and_then(|a| a.get("tenant_id"))
-                                .and_then(|v| v.as_str())
-                                .map(str::to_owned),
+                            tenant_id: authorized_tenant.clone(),
                             tool: request.name.to_string(),
                             decision: "allow".into(),
                             reason_class: "authorized".into(),
@@ -367,11 +385,7 @@ where
                                 "blake3:{}",
                                 blake3::hash(principal.id.as_bytes()).to_hex()
                             ),
-                            tenant_id: args
-                                .as_ref()
-                                .and_then(|a| a.get("tenant_id"))
-                                .and_then(|v| v.as_str())
-                                .map(str::to_owned),
+                            tenant_id: authorized_tenant.clone(),
                             tool: request.name.to_string(),
                             decision: "allow".into(),
                             reason_class: "authorized".into(),
@@ -395,7 +409,7 @@ where
                 }
                 let args = request.arguments.clone();
                 let start = std::time::Instant::now();
-                let result = handle_status(&self.state, args.clone()).await;
+                let result = handle_status(&self.state, args.clone(), &principal).await;
                 let duration = start.elapsed();
                 let (result_summary, _success) = match &result {
                     Ok(_) => (format!("OK ({}ms)", duration.as_millis()), true),
@@ -413,11 +427,7 @@ where
                                 "blake3:{}",
                                 blake3::hash(principal.id.as_bytes()).to_hex()
                             ),
-                            tenant_id: args
-                                .as_ref()
-                                .and_then(|a| a.get("tenant_id"))
-                                .and_then(|v| v.as_str())
-                                .map(str::to_owned),
+                            tenant_id: authorized_tenant.clone(),
                             tool: request.name.to_string(),
                             decision: "allow".into(),
                             reason_class: "authorized".into(),
@@ -436,11 +446,7 @@ where
                 if self.state.audit_log.is_none() {
                     return Err(ErrorData::internal_error("audit unavailable", None));
                 }
-                let tenant_from_args = request
-                    .arguments
-                    .as_ref()
-                    .and_then(|a| a.get("tenant_id"))
-                    .and_then(|v| v.as_str());
+                let tenant_from_args = authorized_tenant.as_deref();
                 if !has_cap(Capability::AttachLocalDoc) {
                     audit_authz(
                         &self.state,
@@ -470,35 +476,9 @@ where
                         return Err(ErrorData::invalid_params("document unavailable", None));
                     }
                 };
-                let tenant = match args.get("tenant_id").and_then(|v| v.as_str()) {
-                    Some(t) if principal.tenant_ids.contains(t) => t,
-                    Some(t) => {
-                        audit_authz(
-                            &self.state,
-                            &principal,
-                            Some(t),
-                            "deny",
-                            "tenant_unauthorized",
-                            "ERROR_CODE",
-                        )
-                        .await
-                        .map_err(|_| ErrorData::internal_error("audit unavailable", None))?;
-                        return Err(ErrorData::invalid_params("document unavailable", None));
-                    }
-                    None => {
-                        audit_authz(
-                            &self.state,
-                            &principal,
-                            None,
-                            "deny",
-                            "invalid_reference",
-                            "ERROR_CODE",
-                        )
-                        .await
-                        .map_err(|_| ErrorData::internal_error("audit unavailable", None))?;
-                        return Err(ErrorData::invalid_params("document unavailable", None));
-                    }
-                };
+                let tenant = authorized_tenant
+                    .as_deref()
+                    .ok_or_else(generic_tenant_error)?;
                 let path = match args.get("path").and_then(|v| v.as_str()) {
                     Some(path) => path,
                     None => {
@@ -572,7 +552,7 @@ where
                 }
                 let args = request.arguments.clone();
                 let start = std::time::Instant::now();
-                let result = handle_graph_entities(&self.state, args.clone()).await;
+                let result = handle_graph_entities(&self.state, args.clone(), &principal).await;
                 let duration = start.elapsed();
                 let (result_summary, _success) = match &result {
                     Ok(_) => (format!("OK ({}ms)", duration.as_millis()), true),
@@ -590,11 +570,7 @@ where
                                 "blake3:{}",
                                 blake3::hash(principal.id.as_bytes()).to_hex()
                             ),
-                            tenant_id: args
-                                .as_ref()
-                                .and_then(|a| a.get("tenant_id"))
-                                .and_then(|v| v.as_str())
-                                .map(str::to_owned),
+                            tenant_id: authorized_tenant.clone(),
                             tool: request.name.to_string(),
                             decision: "allow".into(),
                             reason_class: "authorized".into(),
@@ -618,7 +594,7 @@ where
                 }
                 let args = request.arguments.clone();
                 let start = std::time::Instant::now();
-                let result = handle_graph_rag(&self.state, args.clone()).await;
+                let result = handle_graph_rag(&self.state, args.clone(), &principal).await;
                 let duration = start.elapsed();
                 let (result_summary, _success) = match &result {
                     Ok(_) => (format!("OK ({}ms)", duration.as_millis()), true),
@@ -636,11 +612,7 @@ where
                                 "blake3:{}",
                                 blake3::hash(principal.id.as_bytes()).to_hex()
                             ),
-                            tenant_id: args
-                                .as_ref()
-                                .and_then(|a| a.get("tenant_id"))
-                                .and_then(|v| v.as_str())
-                                .map(str::to_owned),
+                            tenant_id: authorized_tenant.clone(),
                             tool: request.name.to_string(),
                             decision: "allow".into(),
                             reason_class: "authorized".into(),
@@ -710,26 +682,71 @@ fn authz_reason(error: &AuthzError) -> &'static str {
 
 // ===== Tool handlers =====
 
-/// A payload `tenant_id` is a selector among the principal's authorized tenants
-/// only; it can never expand access. No `tenant_id` in the payload defers to the
-/// per-handler single-binding resolution. (issue #22)
-fn payload_tenant_authorized(
+const GENERIC_TENANT_DENIAL: &str = "request unavailable";
+
+fn generic_tenant_error() -> McpError {
+    ErrorData::invalid_params(GENERIC_TENANT_DENIAL, None)
+}
+
+/// Return whether a tool allows omission of `tenant_id` for a principal bound
+/// to exactly one tenant. Every tenant-scoped tool still rejects omission for
+/// multi-tenant principals, so no request can silently fall back to a global
+/// or default tenant.
+fn tenant_selection_mode(tool: &str) -> Option<bool> {
+    match tool {
+        "search" | "status" | "attach_local_doc" | "graph_entities" | "graph_rag" => Some(false),
+        "sync" => Some(true),
+        _ => None,
+    }
+}
+
+/// Resolve a payload tenant only through the authenticated principal binding.
+/// Unknown, empty, missing, and cross-tenant selectors all use one generic
+/// error so callers cannot learn tenant names or resource existence.
+fn resolve_tenant(
     principal: &Principal,
     args: Option<&serde_json::Map<String, Value>>,
-) -> bool {
-    match args
-        .and_then(|a| a.get("tenant_id"))
-        .and_then(|v| v.as_str())
-    {
-        Some(tenant) => principal.tenant_ids.contains(tenant),
-        None => true,
+    allow_implicit_single: bool,
+) -> Result<String, McpError> {
+    let requested = match args.and_then(|a| a.get("tenant_id")) {
+        None => None,
+        Some(Value::String(tenant)) if !tenant.is_empty() => Some(tenant.as_str()),
+        Some(_) => return Err(generic_tenant_error()),
+    };
+
+    match requested {
+        Some(tenant) if !tenant.is_empty() && principal.tenant_ids.contains(tenant) => {
+            Ok(tenant.to_owned())
+        }
+        Some(_) => Err(generic_tenant_error()),
+        None if allow_implicit_single && principal.tenant_ids.len() == 1 => principal
+            .tenant_ids
+            .iter()
+            .next()
+            .filter(|tenant| !tenant.is_empty())
+            .cloned()
+            .ok_or_else(generic_tenant_error),
+        None => Err(generic_tenant_error()),
     }
+}
+
+fn tenant_is_known(state: &ServerState, tenant: &str) -> bool {
+    state.folder_roots.contains_key(tenant)
+        || state
+            .search_engine
+            .as_ref()
+            .is_some_and(|manager| manager.get_engine(tenant).is_some())
 }
 
 async fn handle_search(
     state: &ServerState,
     args: Option<serde_json::Map<String, Value>>,
+    principal: &Principal,
 ) -> Result<CallToolResult, McpError> {
+    let tenant_id = resolve_tenant(principal, args.as_ref(), false)?;
+    if !tenant_is_known(state, &tenant_id) {
+        return Err(generic_tenant_error());
+    }
     let engine_manager = state
         .search_engine
         .as_ref()
@@ -737,16 +754,10 @@ async fn handle_search(
 
     let args_map = args.ok_or_else(|| ErrorData::invalid_params("missing arguments", None))?;
 
-    // Extract tenant_id from arguments (required for multi-tenancy)
-    let tenant_id = args_map
-        .get("tenant_id")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| ErrorData::invalid_params("argument 'tenant_id' (string) required", None))?;
-
     // Get the engine for the specific tenant
     let engine = engine_manager
-        .get_engine(tenant_id)
-        .ok_or_else(|| ErrorData::invalid_params("tenant unavailable", None))?;
+        .get_engine(&tenant_id)
+        .ok_or_else(generic_tenant_error)?;
 
     let params = parse_search_params(Some(args_map))
         .map_err(|_| ErrorData::invalid_params("invalid search arguments", None))?;
@@ -767,23 +778,11 @@ async fn handle_sync(
     args: Option<serde_json::Map<String, Value>>,
     principal: &Principal,
 ) -> Result<CallToolResult, McpError> {
-    let tenant = match args
-        .as_ref()
-        .and_then(|a| a.get("tenant_id"))
-        .and_then(|v| v.as_str())
-        .map(str::to_owned)
-    {
-        Some(t) if principal.tenant_ids.contains(&t) => t,
-        Some(_) => return Err(ErrorData::invalid_params("tenant unauthorized", None)),
-        None if principal.tenant_ids.len() == 1 => {
-            principal.tenant_ids.iter().next().cloned().unwrap()
-        }
-        _ => return Err(ErrorData::invalid_params("tenant_id required", None)),
-    };
+    let tenant = resolve_tenant(principal, args.as_ref(), true)?;
     let roots = state
         .folder_roots
         .get(&tenant)
-        .ok_or_else(|| ErrorData::invalid_params("tenant unavailable", None))?;
+        .ok_or_else(generic_tenant_error)?;
     let root_paths: Vec<PathBuf> = roots.iter().map(|r| r.path.clone()).collect();
     let config_path = state
         .config_path
@@ -846,13 +845,25 @@ async fn handle_sync(
 
 async fn handle_status(
     state: &ServerState,
-    _args: Option<serde_json::Map<String, Value>>,
+    args: Option<serde_json::Map<String, Value>>,
+    principal: &Principal,
 ) -> Result<CallToolResult, McpError> {
+    let tenant = resolve_tenant(principal, args.as_ref(), false)?;
+    if !tenant_is_known(state, &tenant) {
+        return Err(generic_tenant_error());
+    }
+    let search_engine_ready = state
+        .search_engine
+        .as_ref()
+        .is_some_and(|manager| manager.get_engine(&tenant).is_some());
+
+    // Engine-era fingerprints are intentionally process-wide metadata, but
+    // they are exposed only after the requested tenant has been authorized.
     let fp = state.fingerprint.as_ref();
     Ok(CallToolResult::success(vec![ContentBlock::text(
         serde_json::json!({
             "fingerprint": fp.map(|f| format!("{:?}", f)),
-            "search_engine_ready": state.search_engine.is_some(),
+            "search_engine_ready": search_engine_ready,
         })
         .to_string(),
     )]))
@@ -866,7 +877,12 @@ async fn handle_status(
 async fn handle_graph_entities(
     state: &ServerState,
     args: Option<serde_json::Map<String, Value>>,
+    principal: &Principal,
 ) -> Result<CallToolResult, McpError> {
+    let tenant_id = resolve_tenant(principal, args.as_ref(), false)?;
+    if !tenant_is_known(state, &tenant_id) {
+        return Err(generic_tenant_error());
+    }
     #[cfg(feature = "basemind")]
     {
         let engine_manager = state
@@ -875,12 +891,6 @@ async fn handle_graph_entities(
             .ok_or_else(|| ErrorData::internal_error("search engine not initialized", None))?;
         let args_map = args.ok_or_else(|| ErrorData::invalid_params("missing arguments", None))?;
 
-        let tenant_id = args_map
-            .get("tenant_id")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                ErrorData::invalid_params("argument 'tenant_id' (string) required", None)
-            })?;
         let cypher = args_map
             .get("cypher")
             .and_then(|v| v.as_str())
@@ -894,10 +904,10 @@ async fn handle_graph_entities(
             .clamp(1, 1000);
 
         let engine = engine_manager
-            .get_engine(tenant_id)
-            .ok_or_else(|| ErrorData::invalid_params("tenant unavailable", None))?;
+            .get_engine(&tenant_id)
+            .ok_or_else(generic_tenant_error)?;
         let store = engine.lance_store_clone();
-        let tenant = tenant_id.to_string();
+        let tenant = tenant_id.clone();
 
         let cypher_result =
             tokio::task::spawn_blocking(move || store.execute_cypher(&tenant, &cypher, max_rows))
@@ -918,7 +928,7 @@ async fn handle_graph_entities(
 
     #[cfg(not(feature = "basemind"))]
     {
-        let _ = (state, args);
+        let _ = (state, args, tenant_id);
         Err(ErrorData::invalid_params(
             "graph entities requires the basemind feature",
             None,
@@ -934,7 +944,12 @@ async fn handle_graph_entities(
 async fn handle_graph_rag(
     state: &ServerState,
     args: Option<serde_json::Map<String, Value>>,
+    principal: &Principal,
 ) -> Result<CallToolResult, McpError> {
+    let tenant_id = resolve_tenant(principal, args.as_ref(), false)?;
+    if !tenant_is_known(state, &tenant_id) {
+        return Err(generic_tenant_error());
+    }
     #[cfg(feature = "basemind")]
     {
         let engine_manager = state
@@ -943,12 +958,6 @@ async fn handle_graph_rag(
             .ok_or_else(|| ErrorData::internal_error("search engine not initialized", None))?;
         let args_map = args.ok_or_else(|| ErrorData::invalid_params("missing arguments", None))?;
 
-        let tenant_id = args_map
-            .get("tenant_id")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                ErrorData::invalid_params("argument 'tenant_id' (string) required", None)
-            })?;
         let query = args_map
             .get("query")
             .and_then(|v| v.as_str())
@@ -968,13 +977,13 @@ async fn handle_graph_rag(
             .clamp(1, 200);
 
         let engine = engine_manager
-            .get_engine(tenant_id)
-            .ok_or_else(|| ErrorData::invalid_params("tenant unavailable", None))?;
+            .get_engine(&tenant_id)
+            .ok_or_else(generic_tenant_error)?;
         let store = engine.lance_store_clone();
         let embedder = engine.embedder_clone().ok_or_else(|| {
             ErrorData::invalid_params("graph rag requires documents.embed = true", None)
         })?;
-        let tenant = tenant_id.to_string();
+        let tenant = tenant_id.clone();
 
         let (hits, truncated) = tokio::task::spawn_blocking(move || -> Result<_, CliError> {
             let query_vec = embedder
@@ -999,7 +1008,7 @@ async fn handle_graph_rag(
 
     #[cfg(not(feature = "basemind"))]
     {
-        let _ = (state, args);
+        let _ = (state, args, tenant_id);
         Err(ErrorData::invalid_params(
             "graph rag requires the basemind feature",
             None,
@@ -1052,7 +1061,10 @@ fn sync_tool_schema() -> Tool {
 
 fn status_tool_schema() -> Tool {
     #[derive(Serialize, schemars::JsonSchema)]
-    struct StatusArgs {}
+    struct StatusArgs {
+        /// Authorized tenant selector; required to keep status tenant-scoped.
+        tenant_id: String,
+    }
     let input_schema = schema_for_type::<StatusArgs>();
     Tool::new(
         "status",
@@ -1071,6 +1083,7 @@ fn status_tool_schema() -> Tool {
 fn attach_local_doc_tool_schema() -> Tool {
     #[derive(Serialize, schemars::JsonSchema)]
     struct AttachArgs {
+        /// Authorized tenant selector.
         tenant_id: String,
         path: String,
     }
@@ -1081,7 +1094,7 @@ fn attach_local_doc_tool_schema() -> Tool {
 fn graph_entities_tool_schema() -> Tool {
     #[derive(Serialize, schemars::JsonSchema)]
     struct GraphEntitiesArgs {
-        /// Tenant ID for multi-tenancy isolation (required).
+        /// Authorized tenant selector.
         tenant_id: String,
         /// Read-only Cypher query. Only MATCH, RETURN, WHERE, LIMIT, ORDER BY,
         /// WITH, UNION are allowed; CREATE/DELETE/SET/MERGE are rejected.
@@ -1109,7 +1122,7 @@ fn graph_entities_tool_schema() -> Tool {
 fn graph_rag_tool_schema() -> Tool {
     #[derive(Serialize, schemars::JsonSchema)]
     struct GraphRagArgs {
-        /// Tenant ID for multi-tenancy isolation (required).
+        /// Authorized tenant selector.
         tenant_id: String,
         /// Natural-language query to embed and expand through the entity graph.
         query: String,
@@ -1149,7 +1162,7 @@ fn default_graph_rag_results() -> usize {
 /// Schema wrapper for SearchParams to satisfy JsonSchema
 #[derive(Serialize, schemars::JsonSchema)]
 struct SearchParamsSchema {
-    /// Tenant ID for multi-tenancy isolation (required).
+    /// Authorized tenant selector.
     tenant_id: String,
     query: String,
     #[serde(default = "default_top_k")]
@@ -1276,59 +1289,71 @@ mod authz_manifest_tests {
     }
 
     #[test]
+    fn unbound_principal_gets_no_tenant_tools() {
+        let mut registry = ToolRegistry::new();
+        registry.register(search_tool_schema(), Capability::Search);
+        registry.register(status_tool_schema(), Capability::Status);
+        let principal = Principal {
+            id: "unbound".into(),
+            name: "unbound".into(),
+            capabilities: vec![Capability::Search, Capability::Status],
+            tenant_ids: HashSet::new(),
+        };
+        assert!(registry.available_tools(&principal).is_empty());
+    }
+
+    #[test]
     fn tenant_maps_do_not_cross_contaminate() {
-        let mut roots = HashMap::new();
-        roots.insert("a".to_string(), vec![FolderRoot::new("local", "/a")]);
-        roots.insert("b".to_string(), vec![FolderRoot::new("local", "/b")]);
-        let mut processed = HashMap::new();
-        processed.insert(
-            "a".to_string(),
-            HashMap::from([(PathBuf::from("/a/doc"), "clean-a".to_string())]),
-        );
-        assert!(
-            !roots
-                .get("b")
+        let base =
+            std::env::temp_dir().join(format!("hacienda-mcp-tenant-paths-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let root_a = base.join("tenant-a");
+        let root_b = base.join("tenant-b");
+        std::fs::create_dir_all(&root_a).unwrap();
+        std::fs::create_dir_all(&root_b).unwrap();
+        let doc_a = root_a.join("doc.md");
+        let doc_b = root_b.join("doc.md");
+        std::fs::write(&doc_a, "clean-a").unwrap();
+        std::fs::write(&doc_b, "clean-b").unwrap();
+
+        let canonical_a = std::fs::canonicalize(&doc_a).unwrap();
+        let canonical_b = std::fs::canonicalize(&doc_b).unwrap();
+        assert_ne!(canonical_a, canonical_b);
+
+        let roots_a = vec![FolderRoot::new("local", &root_a)];
+        let roots_b = vec![FolderRoot::new("local", &root_b)];
+        let processed_a = HashMap::from([(canonical_a, "clean-a".to_string())]);
+        let processed_b = HashMap::from([(canonical_b, "clean-b".to_string())]);
+
+        assert_eq!(
+            attach_local_doc(&doc_a, &roots_a, &processed_a)
                 .unwrap()
-                .iter()
-                .any(|r| r.path == PathBuf::from("/a"))
+                .token,
+            "clean-a"
         );
-        assert!(
-            !processed
-                .get("b")
-                .map(|m| m.contains_key(PathBuf::from("/a/doc").as_path()))
-                .unwrap_or(false)
+        assert_eq!(
+            attach_local_doc(&doc_b, &roots_a, &processed_a),
+            Err(AuthzError::OutsideRoot)
         );
+        assert_eq!(
+            attach_local_doc(&doc_a, &roots_b, &processed_b),
+            Err(AuthzError::OutsideRoot)
+        );
+        assert_eq!(
+            attach_local_doc(&doc_b, &roots_b, &processed_b)
+                .unwrap()
+                .token,
+            "clean-b"
+        );
+
+        let _ = std::fs::remove_dir_all(base);
     }
 }
 
 #[cfg(test)]
 mod tenant_authz_tests {
     use super::*;
-    use crate::config::{HaciendaConfig, TenantConfig};
     use std::collections::HashSet;
-
-    fn extra_tenant(tenant_id: &str) -> TenantConfig {
-        TenantConfig {
-            tenant_id: tenant_id.into(),
-            folder_roots: Vec::new(),
-            name: tenant_id.into(),
-            lance_dir: None,
-            tantivy_dir: None,
-            vault_dir: None,
-            encryption: None,
-            kms: None,
-            active: true,
-        }
-    }
-
-    fn test_config() -> HaciendaConfig {
-        let mut config: HaciendaConfig = toml::from_str(
-            "default_tenant = \"flux-a\"\n[[tenants]]\ntenant_id = \"flux-a\"\nname = \"a\"\n",
-        )
-        .unwrap();
-        config.tenants.push(extra_tenant("flux-b"));
-        config
-    }
 
     /// Denial text must be generic: no tenant names, no storage paths, no
     /// counts, no existence hints. (issue #22, acceptance 1/5)
@@ -1376,33 +1401,64 @@ mod tenant_authz_tests {
     }
 
     /// A payload tenant_id selects among authorized tenants; it can never grant
-    /// access to an unbound tenant, and omission defers to the handler.
+    /// access to an unbound tenant. Omission is allowed only by handlers that
+    /// explicitly opt into single-binding resolution (currently `sync`).
     #[test]
-    fn payload_tenant_id_is_selector_never_grant() {
+    fn tenant_resolution_is_selector_never_grant() {
         let principal = principal_bound_to("flux-a");
         let mut other = args();
         other.insert("tenant_id".into(), "flux-b".into());
         let mut ghost = args();
         ghost.insert("tenant_id".into(), "ghost".into());
 
-        assert!(payload_tenant_authorized(&principal, None));
-        assert!(!payload_tenant_authorized(&principal, Some(&other)));
-        assert!(!payload_tenant_authorized(&principal, Some(&ghost)));
+        assert_eq!(resolve_tenant(&principal, None, true).unwrap(), "flux-a");
+        assert!(resolve_tenant(&principal, None, false).is_err());
+        assert!(resolve_tenant(&principal, Some(&other), true).is_err());
+        assert!(resolve_tenant(&principal, Some(&ghost), true).is_err());
         // Payload authorization does not depend on the caller's tool or role.
         let mut own = args();
         own.insert("tenant_id".into(), "flux-a".into());
-        assert!(payload_tenant_authorized(&principal, Some(&own)));
+        assert_eq!(
+            resolve_tenant(&principal, Some(&own), true).unwrap(),
+            "flux-a"
+        );
+        let mut malformed = args();
+        malformed.insert("tenant_id".into(), Value::Null);
+        assert!(resolve_tenant(&principal, Some(&malformed), true).is_err());
+
+        let multi = Principal {
+            tenant_ids: HashSet::from(["flux-a".into(), "flux-b".into()]),
+            ..principal
+        };
+        assert!(resolve_tenant(&multi, None, true).is_err());
+        for tenant in ["flux-a", "flux-b"] {
+            let mut selected = args();
+            selected.insert("tenant_id".into(), tenant.into());
+            assert_eq!(
+                resolve_tenant(&multi, Some(&selected), true).unwrap(),
+                tenant
+            );
+        }
+        for tool in [
+            "search",
+            "status",
+            "attach_local_doc",
+            "graph_entities",
+            "graph_rag",
+        ] {
+            assert_eq!(tenant_selection_mode(tool), Some(false), "{tool}");
+        }
+        assert_eq!(tenant_selection_mode("sync"), Some(true));
     }
 
     /// Search against an unknown tenant fails before storage access with a
     /// generic message (and no engine is ever minted for it).
     #[tokio::test]
     async fn search_denies_unknown_tenant_generically() {
-        let manager = TenantSearchEngineManager::new(test_config()).await.unwrap();
         let state = ServerState {
             registry: Arc::new(RwLock::new(ToolRegistry::new())),
             fingerprint: None,
-            search_engine: Some(Arc::new(manager)),
+            search_engine: None,
             config_path: None,
             audit_log: None,
             folder_roots: HashMap::new(),
@@ -1411,12 +1467,30 @@ mod tenant_authz_tests {
 
         let mut ghost = args();
         ghost.insert("tenant_id".into(), "ghost".into());
-        let err = handle_search(&state, Some(ghost)).await.unwrap_err();
+        let err = handle_search(&state, Some(ghost), &principal_bound_to("flux-a"))
+            .await
+            .unwrap_err();
+        assert_generic_denial(&err.message);
+
+        let mut unknown_binding = args();
+        unknown_binding.insert("tenant_id".into(), "ghost".into());
+        let err = handle_search(&state, Some(unknown_binding), &principal_bound_to("ghost"))
+            .await
+            .unwrap_err();
+        assert_generic_denial(&err.message);
+
+        let mut cross_tenant = args();
+        cross_tenant.insert("tenant_id".into(), "flux-b".into());
+        let err = handle_search(&state, Some(cross_tenant), &principal_bound_to("flux-a"))
+            .await
+            .unwrap_err();
         assert_generic_denial(&err.message);
 
         // Authorized tenant with no payload tenant_id fails closed on missing
         // arguments rather than silently degrading.
-        let err = handle_search(&state, None).await.unwrap_err();
+        let err = handle_search(&state, None, &principal_bound_to("flux-a"))
+            .await
+            .unwrap_err();
         assert_generic_denial(&err.message);
     }
 
@@ -1444,20 +1518,64 @@ mod tenant_authz_tests {
         .await
         .unwrap_err();
         assert_generic_denial(&err.message);
+
+        let mut unknown = args();
+        unknown.insert("tenant_id".into(), "ghost".into());
+        let err = handle_sync(
+            &ServerState {
+                registry: Arc::new(RwLock::new(ToolRegistry::new())),
+                fingerprint: None,
+                search_engine: None,
+                config_path: None,
+                audit_log: None,
+                folder_roots: HashMap::new(),
+                processed_index: Arc::new(RwLock::new(HashMap::new())),
+            },
+            Some(unknown),
+            &principal_a,
+        )
+        .await
+        .unwrap_err();
+        assert_generic_denial(&err.message);
+    }
+
+    #[tokio::test]
+    async fn graph_surfaces_deny_cross_tenant_before_backend_access() {
+        let principal_a = principal_bound_to("flux-a");
+        let state = ServerState {
+            registry: Arc::new(RwLock::new(ToolRegistry::new())),
+            fingerprint: None,
+            search_engine: None,
+            config_path: None,
+            audit_log: None,
+            folder_roots: HashMap::new(),
+            processed_index: Arc::new(RwLock::new(HashMap::new())),
+        };
+        let mut other = args();
+        other.insert("tenant_id".into(), "flux-b".into());
+        other.insert("cypher".into(), "MATCH (n) RETURN n".into());
+        let err = handle_graph_entities(&state, Some(other.clone()), &principal_a)
+            .await
+            .unwrap_err();
+        assert_generic_denial(&err.message);
+
+        let mut rag = other;
+        rag.insert("query".into(), "secret".into());
+        let err = handle_graph_rag(&state, Some(rag), &principal_a)
+            .await
+            .unwrap_err();
+        assert_generic_denial(&err.message);
     }
 
     /// attach_local_doc across tenants is denied before attachment occurs.
     #[test]
     fn attach_gate_denies_cross_tenant() {
         let principal_a = principal_bound_to("flux-a");
-        assert!(!payload_tenant_authorized(
-            &principal_a,
-            Some(&{
-                let mut a = args();
-                a.insert("tenant_id".into(), "flux-b".into());
-                a
-            })
-        ));
+        for tenant in ["flux-b", "ghost"] {
+            let mut requested = args();
+            requested.insert("tenant_id".into(), tenant.into());
+            assert!(resolve_tenant(&principal_a, Some(&requested), false).is_err());
+        }
         // Denial text for attach stays generic ("document unavailable").
         assert_generic_denial("document unavailable");
     }
@@ -1471,10 +1589,43 @@ mod tenant_authz_tests {
             search_engine: None,
             config_path: None,
             audit_log: None,
-            folder_roots: HashMap::new(),
+            folder_roots: HashMap::from([
+                ("flux-a".to_owned(), Vec::new()),
+                ("flux-b".to_owned(), Vec::new()),
+            ]),
             processed_index: Arc::new(RwLock::new(HashMap::new())),
         };
-        let result = handle_status(&state, Some(args())).await.unwrap();
+        let mut ghost = args();
+        ghost.insert("tenant_id".into(), "ghost".into());
+        let err = handle_status(&state, Some(ghost), &principal_bound_to("flux-a"))
+            .await
+            .unwrap_err();
+        assert_generic_denial(&err.message);
+
+        let mut unknown_binding = args();
+        unknown_binding.insert("tenant_id".into(), "ghost".into());
+        let err = handle_status(&state, Some(unknown_binding), &principal_bound_to("ghost"))
+            .await
+            .unwrap_err();
+        assert_generic_denial(&err.message);
+
+        let err = handle_status(&state, None, &principal_bound_to("flux-a"))
+            .await
+            .unwrap_err();
+        assert_generic_denial(&err.message);
+
+        let mut cross_tenant = args();
+        cross_tenant.insert("tenant_id".into(), "flux-b".into());
+        let err = handle_status(&state, Some(cross_tenant), &principal_bound_to("flux-a"))
+            .await
+            .unwrap_err();
+        assert_generic_denial(&err.message);
+
+        let mut own = args();
+        own.insert("tenant_id".into(), "flux-a".into());
+        let result = handle_status(&state, Some(own), &principal_bound_to("flux-a"))
+            .await
+            .unwrap();
         let text: String = result
             .content
             .iter()

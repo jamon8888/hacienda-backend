@@ -822,6 +822,21 @@ impl HaciendaConfig {
             .find(|p| p.principal_id == principal_id)
     }
 
+    /// Check that a tenant binding points at an active configured tenant.
+    /// Single-tenant configurations use `default_tenant` without a tenants
+    /// array; every other binding must resolve to an explicit active entry.
+    pub fn has_active_tenant(&self, tenant_id: &str) -> bool {
+        if tenant_id.is_empty() {
+            return false;
+        }
+        if self.tenants.is_empty() {
+            return tenant_id == self.default_tenant_id();
+        }
+        self.tenants
+            .iter()
+            .any(|tenant| tenant.active && tenant.tenant_id == tenant_id)
+    }
+
     /// Get a tenant by ID.
     pub fn get_tenant(&self, tenant_id: &str) -> Option<&TenantConfig> {
         self.tenants.iter().find(|t| t.tenant_id == tenant_id)
