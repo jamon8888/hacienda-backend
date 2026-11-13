@@ -153,6 +153,7 @@ pub struct AuditLog {
     current_size: Arc<Mutex<u64>>,
     epoch: Arc<Mutex<u64>>,
     sequence: Arc<Mutex<u64>>,
+    append_lock: Arc<Mutex<()>>,
     signing_key: SigningKey,
     verifying_key: VerifyingKey,
 }
@@ -226,8 +227,8 @@ impl AuditLog {
         // Determine current epoch by scanning existing log files.
         let (epoch, current_path, current_size) = Self::discover_current_log(&config).await?;
 
-        // Determine current sequence by scanning the current log file.
-        let sequence = Self::count_lines(&current_path).await.unwrap_or(0);
+        // Determine the sequence across all retained epochs.
+        let sequence = Self::max_sequence(&config).await.unwrap_or(0);
 
         let file = OpenOptions::new()
             .create(true)
@@ -243,6 +244,7 @@ impl AuditLog {
             current_size: Arc::new(Mutex::new(current_size)),
             epoch: Arc::new(Mutex::new(epoch)),
             sequence: Arc::new(Mutex::new(sequence)),
+            append_lock: Arc::new(Mutex::new(())),
             signing_key,
             verifying_key,
         })
@@ -287,16 +289,22 @@ impl AuditLog {
         Ok((latest_epoch, latest_path, size))
     }
 
-    async fn count_lines(path: &Path) -> Result<u64> {
-        if !path.exists() {
-            return Ok(0);
+    async fn max_sequence(config: &AuditConfig) -> Result<u64> {
+        let mut maximum = 0;
+        let mut entries = tokio::fs::read_dir(&config.log_dir).await?;
+        while let Some(entry) = entries.next_entry().await? {
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("log") {
+                continue;
+            }
+            let file = std::fs::File::open(path)?;
+            for line in BufReader::new(file).lines().map_while(std::result::Result::ok) {
+                if let Ok(record) = serde_json::from_str::<AuditRecord>(&line) {
+                    maximum = maximum.max(record.sequence);
+                }
+            }
         }
-        let file = std::fs::File::open(path)?;
-        let reader = BufReader::new(file);
-        Ok(reader
-            .lines()
-            .filter(|l| l.is_ok() && !l.as_ref().unwrap().trim().is_empty())
-            .count() as u64)
+        Ok(maximum)
     }
 
     /// Compute the hash chain value for a record.
@@ -404,6 +412,17 @@ impl AuditLog {
         // Enforce the MCP allowlist and metadata-only boundary before signing or writing.
         record = sanitize_record(record)?;
 
+        // Serialize the complete append operation so sequence, rotation, and
+        // hash-chain state remain consistent under concurrent callers.
+        let _append_guard = self.append_lock.lock().await;
+
+        // Capture the preceding record before rotation moves the writer to a
+        // new epoch; the chain continues across epoch files.
+        let previous_hash = self.last_record_hash().await?;
+
+        // Rotate before assigning the record's epoch and sequence.
+        self.maybe_rotate().await?;
+
         // Assign sequence number and epoch.
         let (seq, epoch) = {
             let mut seq_guard = self.sequence.lock().await;
@@ -416,7 +435,6 @@ impl AuditLog {
         record.timestamp = chrono::Utc::now().to_rfc3339();
 
         // Hash-chain: link to previous record.
-        let previous_hash = self.last_record_hash().await?;
         record.previous_hash = previous_hash;
 
         // Canonicalize for signing and record_hash.
@@ -434,9 +452,6 @@ impl AuditLog {
         let line = serde_json::to_string(&record)
             .map_err(|e| anyhow::anyhow!("serialize record: {}", e))?;
         let line_len = line.len() as u64 + 1; // +1 for newline
-
-        // Rotate if needed (all mutable state is behind Arc<Mutex<>>).
-        self.maybe_rotate().await?;
 
         let mut writer = self.writer.lock().await;
         writeln!(writer, "{}", line).map_err(|e| anyhow::anyhow!("write audit record: {}", e))?;
@@ -498,6 +513,7 @@ impl AuditLog {
 
         let mut expected_seq = 0u64;
         let mut previous_hash = GENESIS_HASH.to_string();
+        let mut first_record = true;
 
         for (epoch, path) in entries {
             let file = match std::fs::File::open(&path) {
@@ -537,6 +553,14 @@ impl AuditLog {
                     }
                 };
 
+                // Retention may remove earlier epochs, so anchor validation at
+                // the first retained record while still checking its hash and
+                // signature and enforcing continuity thereafter.
+                if first_record {
+                    expected_seq = record.sequence.saturating_sub(1);
+                    previous_hash = record.previous_hash.clone();
+                    first_record = false;
+                }
                 expected_seq += 1;
                 if record.sequence != expected_seq {
                     errors.push(format!(
