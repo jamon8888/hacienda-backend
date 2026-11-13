@@ -17,7 +17,7 @@ use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use std::fs::OpenOptions;
-use std::io::{BufReader, BufWriter, Write};
+use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -28,7 +28,7 @@ const B64: base64::engine::general_purpose::GeneralPurpose =
     base64::engine::general_purpose::STANDARD;
 
 /// Zero hash used as the genesis previous_hash for the first record.
-const GENESIS_HASH: &str = "0".repeat(64);
+const GENESIS_HASH: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 
 /// MCP tools whose calls may be represented in this audit log.
 ///
@@ -298,7 +298,7 @@ impl AuditLog {
         let mut hasher = Hasher::new();
         hasher.update(previous_hash.as_bytes());
         hasher.update(canonical);
-        format!("{:x}", hasher.finalize())
+        hasher.finalize().to_hex().to_string()
     }
 
     /// Rotate to a new log file if the current one exceeds max_size_bytes.
@@ -650,7 +650,7 @@ impl AuditLog {
 }
 
 /// Sanitize an audit record to enforce metadata-only boundary.
-fn sanitize_record(mut record: AuditRecord) -> Result<AuditRecord> {
+pub fn sanitize_record(mut record: AuditRecord) -> Result<AuditRecord> {
     if !MCP_AUDIT_TOOLS.contains(&record.tool.as_str()) {
         return Err(anyhow::anyhow!("audit tool is not allowlisted"));
     }
@@ -734,7 +734,6 @@ impl AuditMiddleware {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeMap;
 
     fn test_config() -> AuditConfig {
         let dir = std::env::temp_dir().join(format!("hacienda-audit-test-{}", std::process::id()));

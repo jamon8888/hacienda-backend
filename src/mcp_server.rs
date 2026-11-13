@@ -307,6 +307,7 @@ where
                 if let Some(ref audit_log) = self.state.audit_log {
                     let record = crate::audit::AuditRecord {
                         sequence: 0,
+                        epoch: 0,
                         timestamp: chrono::Utc::now().to_rfc3339(),
                         principal_id: principal.id.clone(),
                         tool: "search".to_string(),
@@ -326,6 +327,8 @@ where
                             reason_class: "authorized".into(),
                         },
                         result_summary,
+                        previous_hash: String::new(),
+                        record_hash: String::new(),
                         signature: String::new(),
                         public_key: String::new(),
                     };
@@ -356,6 +359,7 @@ where
                 if let Some(ref audit_log) = self.state.audit_log {
                     let record = crate::audit::AuditRecord {
                         sequence: 0,
+                        epoch: 0,
                         timestamp: chrono::Utc::now().to_rfc3339(),
                         principal_id: principal.id.clone(),
                         tool: "sync".to_string(),
@@ -375,6 +379,8 @@ where
                             reason_class: "authorized".into(),
                         },
                         result_summary,
+                        previous_hash: String::new(),
+                        record_hash: String::new(),
                         signature: String::new(),
                         public_key: String::new(),
                     };
@@ -402,6 +408,7 @@ where
                 if let Some(ref audit_log) = self.state.audit_log {
                     let record = crate::audit::AuditRecord {
                         sequence: 0,
+                        epoch: 0,
                         timestamp: chrono::Utc::now().to_rfc3339(),
                         principal_id: principal.id.clone(),
                         tool: "status".to_string(),
@@ -421,6 +428,8 @@ where
                             reason_class: "authorized".into(),
                         },
                         result_summary,
+                        previous_hash: String::new(),
+                        record_hash: String::new(),
                         signature: String::new(),
                         public_key: String::new(),
                     };
@@ -579,6 +588,7 @@ where
                 if let Some(ref audit_log) = self.state.audit_log {
                     let record = crate::audit::AuditRecord {
                         sequence: 0,
+                        epoch: 0,
                         timestamp: chrono::Utc::now().to_rfc3339(),
                         principal_id: principal.id.clone(),
                         tool: "graph_entities".to_string(),
@@ -598,6 +608,8 @@ where
                             reason_class: "authorized".into(),
                         },
                         result_summary,
+                        previous_hash: String::new(),
+                        record_hash: String::new(),
                         signature: String::new(),
                         public_key: String::new(),
                     };
@@ -625,6 +637,7 @@ where
                 if let Some(ref audit_log) = self.state.audit_log {
                     let record = crate::audit::AuditRecord {
                         sequence: 0,
+                        epoch: 0,
                         timestamp: chrono::Utc::now().to_rfc3339(),
                         principal_id: principal.id.clone(),
                         tool: "graph_rag".to_string(),
@@ -644,6 +657,8 @@ where
                             reason_class: "authorized".into(),
                         },
                         result_summary,
+                        previous_hash: String::new(),
+                        record_hash: String::new(),
                         signature: String::new(),
                         public_key: String::new(),
                     };
@@ -674,6 +689,7 @@ async fn audit_authz(
         .ok_or_else(|| anyhow::anyhow!("audit unavailable"))?;
     log.append_required(crate::audit::AuditRecord {
         sequence: 0,
+        epoch: 0,
         timestamp: String::new(),
         principal_id: principal.id.clone(),
         tool: "attach_local_doc".into(),
@@ -689,6 +705,8 @@ async fn audit_authz(
             reason_class: reason_class.into(),
         },
         result_summary: result_summary.into(),
+        previous_hash: String::new(),
+        record_hash: String::new(),
         signature: String::new(),
         public_key: String::new(),
     })

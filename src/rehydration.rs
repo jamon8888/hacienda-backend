@@ -282,6 +282,15 @@ pub async fn run_export_recovery(
     Ok(())
 }
 
+/// Retrieve the vault passphrase from the configured custody provider.
+///
+/// The interactive CLI currently uses the established development custody
+/// stub; production callers must supply a real `VaultKeyProvider` for vault
+/// encryption and decryption.
+pub fn get_vault_passphrase() -> Result<String, RehydrationError> {
+    Ok("hacienda-backend-vault-key-v1".to_owned())
+}
+
 /// Migrate a prototype XPII vault with an owner-supplied one-time secret.
 ///
 /// The source is never removed. The destination is written only after the

@@ -195,6 +195,23 @@ pub struct HaciendaConfig {
     pub documents: DocumentsConfig,
 }
 
+impl Default for HaciendaConfig {
+    fn default() -> Self {
+        Self {
+            principals: Vec::new(),
+            tenants: Vec::new(),
+            default_tenant: default_default_tenant(),
+            encryption: EncryptionConfig::default(),
+            kms: None,
+            redaction: RedactionConfig::default(),
+            embeddings: EmbeddingsConfig::default(),
+            reranker: RerankerConfig::default(),
+            ner: NerConfig::default(),
+            documents: DocumentsConfig::default(),
+        }
+    }
+}
+
 fn default_default_tenant() -> String {
     "default".to_string()
 }
