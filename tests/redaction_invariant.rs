@@ -6,7 +6,7 @@
 //! - Audit records are metadata-only: never raw PII, tokens, or error details.
 
 use hacienda_backend::audit::{AuditOperationClass, AuditRecord, MCP_AUDIT_TOOLS, sanitize_record};
-use hacienda_backend::config::{HaciendaConfig, RedactionConfig, doctor_checks};
+use hacienda_backend::config::{HaciendaConfig, doctor_checks};
 use serde_json::json;
 
 #[test]

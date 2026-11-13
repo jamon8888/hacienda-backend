@@ -350,11 +350,11 @@ impl LocalSidecarClient {
             let mut read = BufReader::new(read);
             let mut write = write;
             client_handshake(&mut read, &mut write, &credential).await?;
-            return Ok(Self {
+            Ok(Self {
                 credential,
                 read: tokio::sync::Mutex::new(read),
                 write: tokio::sync::Mutex::new(write),
-            });
+            })
         }
         #[cfg(windows)]
         {
@@ -367,12 +367,13 @@ impl LocalSidecarClient {
             let mut read = BufReader::new(read);
             let mut write = write;
             client_handshake(&mut read, &mut write, &credential).await?;
-            return Ok(Self {
+            Ok(Self {
                 credential,
                 read: tokio::sync::Mutex::new(read),
                 write: tokio::sync::Mutex::new(write),
-            });
+            })
         }
+        #[cfg(not(any(unix, windows)))]
         Err(SidecarError::Unavailable)
     }
 
