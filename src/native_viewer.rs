@@ -7,7 +7,7 @@
 //! temporary files, logs, HTTP, or MCP.
 
 use async_trait::async_trait;
-use std::{path::PathBuf, process::Stdio, sync::Arc};
+use std::{collections::HashMap, path::PathBuf, process::Stdio, sync::Arc};
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
@@ -165,15 +165,29 @@ async fn run_macos_viewer() -> Result<(), NativeViewerError> {
 /// input; the platform assertion proves the interactive OS user is present.
 #[derive(Clone, Debug)]
 pub struct PlatformOwnerPresence {
-    principal_id: String,
     tenant_id: String,
+    #[cfg(not(target_os = "windows"))]
+    principal_id: String,
+    #[cfg(target_os = "windows")]
+    os_user_to_principal: HashMap<String, String>,
 }
 
 impl PlatformOwnerPresence {
+    #[cfg(not(target_os = "windows"))]
     pub fn new(principal_id: String, tenant_id: String) -> Self {
         Self {
             principal_id,
             tenant_id,
+        }
+    }
+
+    /// Bind Windows identities to the authenticated OS account name returned
+    /// by the process token, never to a caller-provided principal field.
+    #[cfg(target_os = "windows")]
+    pub fn for_windows(tenant_id: String, os_user_to_principal: HashMap<String, String>) -> Self {
+        Self {
+            tenant_id,
+            os_user_to_principal,
         }
     }
 }
@@ -190,12 +204,25 @@ impl OwnerPresence for PlatformOwnerPresence {
         if !cfg!(any(target_os = "windows", target_os = "macos")) {
             return Err(OwnerAuthError::Unavailable);
         }
-        let challenge = challenge.clone();
-        let principal = self.principal_id.clone();
         let tenant = self.tenant_id.clone();
-        tokio::task::spawn_blocking(move || verify_platform(&challenge, &principal, &tenant))
+        #[cfg(target_os = "windows")]
+        {
+            let challenge = challenge.clone();
+            let users = self.os_user_to_principal.clone();
+            return tokio::task::spawn_blocking(move || {
+                verify_platform(&challenge, &users, &tenant)
+            })
             .await
-            .map_err(|_| OwnerAuthError::Unavailable)?
+            .map_err(|_| OwnerAuthError::Unavailable)?;
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let challenge = challenge.clone();
+            let principal = self.principal_id.clone();
+            tokio::task::spawn_blocking(move || verify_platform(&challenge, &principal, &tenant))
+                .await
+                .map_err(|_| OwnerAuthError::Unavailable)?
+        }
     }
 }
 
@@ -233,7 +260,7 @@ fn verify_platform(
 #[cfg(target_os = "windows")]
 fn verify_platform(
     challenge: &DisclosureChallenge,
-    principal: &str,
+    users: &HashMap<String, String>,
     tenant: &str,
 ) -> Result<OwnerIdentity, OwnerAuthError> {
     use windows::{
@@ -260,11 +287,26 @@ fn verify_platform(
     if result != UserConsentVerificationResult::Verified {
         return Err(OwnerAuthError::Invalid);
     }
+    let user = authenticated_windows_user()?;
+    let principal = users.get(&user).ok_or(OwnerAuthError::Invalid)?;
     Ok(OwnerIdentity {
-        principal_id: principal.into(),
+        principal_id: principal.clone(),
         tenant_id: tenant.into(),
         method: "windows-hello-user-presence".into(),
     })
+}
+
+#[cfg(target_os = "windows")]
+fn authenticated_windows_user() -> Result<String, OwnerAuthError> {
+    use windows::{Win32::System::WindowsProgramming::GetUserNameW, core::PWSTR};
+    let mut buffer = vec![0u16; 512];
+    let mut length = buffer.len() as u32;
+    // SAFETY: buffer is writable and its capacity is supplied to the OS; the
+    // API writes at most that capacity and reports the resulting UTF-16 length.
+    unsafe { GetUserNameW(Some(PWSTR(buffer.as_mut_ptr())), &mut length) }
+        .map_err(|_| OwnerAuthError::Unavailable)?;
+    let length = length.saturating_sub(1) as usize;
+    String::from_utf16(&buffer[..length]).map_err(|_| OwnerAuthError::Invalid)
 }
 
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]

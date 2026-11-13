@@ -72,7 +72,9 @@ pub struct RehydrationManifest {
     pub gaze_manifest: Vec<u8>,
 }
 
-/// Result of a dual-store write: the gaze manifest bytes and the encrypted vault map.
+/// Result of a dual-store write: a protected Gaze snapshot manifest and the
+/// encrypted vault map. Both artifacts are bound to one engine era and
+/// document fingerprint before they can be restored.
 #[derive(Debug)]
 pub struct DualStoreOutput {
     /// Engine-era fingerprint for this write.
@@ -154,12 +156,22 @@ pub async fn write_dual_store(
             &document_binding,
             provider.as_ref(),
         )?;
+        // Protect the Gaze SensitiveSnapshot with the same custody key and
+        // independent document/engine AAD.  A plaintext manifest must never
+        // be sufficient to restore a session or a rehydration map.
+        let protected_gaze_manifest = encrypt_vault_blob(
+            &gaze_manifest,
+            &fingerprint,
+            &document_binding,
+            provider.as_ref(),
+        )
+        .map_err(|e| DualStoreError::Custody(e.to_string()))?;
         // Keep binding metadata in the independently supplied manifest artifact;
         // rehydration checks it before asking custody for the decryption key.
         let gaze_manifest = serde_json::to_vec(&RehydrationManifest {
             fingerprint: fingerprint.clone(),
             document_binding: document_binding.clone(),
-            gaze_manifest,
+            gaze_manifest: protected_gaze_manifest,
         })?;
         // Commit the rewritten content back.
         document.content = temp_doc.content;

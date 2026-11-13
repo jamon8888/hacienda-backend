@@ -1,7 +1,7 @@
 //! Encryption at rest for LanceDB, Tantivy, and Vault.
 //! Supports AES-256-GCM and ChaCha20-Poly1305 with KMS/HSM integration.
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
@@ -13,6 +13,8 @@ use crate::config::EncryptionConfig;
 /// Service/account names are identifiers, never key material.
 pub const VAULT_KEYCHAIN_SERVICE: &str = "hacienda-backend-vault";
 pub const VAULT_KEYCHAIN_ACCOUNT: &str = "vault-key-v1";
+#[cfg(target_os = "windows")]
+const WINDOWS_VAULT_CREDENTIAL_TARGET: &str = "Hacienda-Vault-Key-v1";
 
 /// Custody seam for vault encryption. Implementations must never expose key material in logs.
 pub trait VaultKeyProvider: Send + Sync {
@@ -51,6 +53,55 @@ impl VaultKeyProvider for KeychainVaultKeyProvider {
     }
 }
 
+/// Windows Credential Manager-backed vault custody. Credential Manager/DPAPI
+/// is the production Windows custody seam; missing or malformed credentials
+/// fail closed instead of falling back to a passphrase or environment value.
+#[cfg(target_os = "windows")]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct WindowsCredentialVaultKeyProvider;
+
+#[cfg(target_os = "windows")]
+impl VaultKeyProvider for WindowsCredentialVaultKeyProvider {
+    fn key(&self) -> Result<[u8; 32]> {
+        use std::{ptr, slice};
+        use windows::{
+            Win32::Security::Credentials::{CRED_TYPE_GENERIC, CREDENTIALW, CredFree, CredReadW},
+            core::{HSTRING, PCWSTR},
+        };
+        let target = HSTRING::from(WINDOWS_VAULT_CREDENTIAL_TARGET);
+        let mut raw: *mut CREDENTIALW = ptr::null_mut();
+        // SAFETY: target is a live NUL-terminated UTF-16 string and raw is a
+        // valid out-pointer for this synchronous API. The returned allocation
+        // is copied and released exactly once below.
+        unsafe {
+            CredReadW(
+                PCWSTR(target.as_ptr()),
+                CRED_TYPE_GENERIC,
+                Some(0),
+                &mut raw,
+            )
+        }
+        .context("Windows Credential Manager vault key unavailable")?;
+        if raw.is_null() {
+            bail!("Windows Credential Manager returned no vault key");
+        }
+        // SAFETY: CredReadW succeeded and returned a live CREDENTIALW. The
+        // blob is copied before CredFree invalidates the allocation.
+        let result = unsafe {
+            let credential = &*raw;
+            if credential.CredentialBlob.is_null() || credential.CredentialBlobSize != 32 {
+                CredFree(raw.cast());
+                bail!("Windows vault credential has invalid length");
+            }
+            slice::from_raw_parts(credential.CredentialBlob, 32).try_into()
+        };
+        // SAFETY: raw is the one allocation returned by CredReadW and is not
+        // used after this release.
+        unsafe { CredFree(raw.cast()) };
+        result.map_err(|_| anyhow::anyhow!("Windows vault credential has invalid length"))
+    }
+}
+
 /// Select custody from validated configuration. Production never accepts a
 /// fixture key; development/test fixtures must be explicitly supplied.
 pub fn vault_key_provider(config: &EncryptionConfig) -> Result<Box<dyn VaultKeyProvider>> {
@@ -73,11 +124,18 @@ pub fn default_vault_key_provider() -> Result<Box<dyn VaultKeyProvider>> {
 fn select_vault_key_provider(mode: &str) -> Result<Box<dyn VaultKeyProvider>> {
     match mode {
         "production" => {
-            let provider = KeychainVaultKeyProvider;
+            #[cfg(target_os = "macos")]
+            let provider: Box<dyn VaultKeyProvider> = Box::new(KeychainVaultKeyProvider);
+            #[cfg(target_os = "windows")]
+            let provider: Box<dyn VaultKeyProvider> = Box::new(WindowsCredentialVaultKeyProvider);
+            #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+            return Err(anyhow::anyhow!(
+                "production vault custody unavailable on this platform"
+            ));
             provider
                 .key()
-                .context("production vault Keychain custody unavailable")?;
-            Ok(Box::new(provider))
+                .context("production vault custody unavailable")?;
+            Ok(provider)
         }
         "development" | "test" => {
             let raw = std::env::var("HACIENDA_VAULT_FIXTURE_KEY").context(

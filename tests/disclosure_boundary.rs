@@ -3,9 +3,8 @@
 use async_trait::async_trait;
 use hacienda_backend::disclosure::{
     AuditError, DisclosureAuditEntry, DisclosureAuditSink, DisclosureChallenge, DisclosureScope,
-    HumanDisclosure, OwnerAuthError, OwnerAuthProof, OwnerIdentity, OwnerPresence, RequesterRef,
-    SecureViewerSink, VaultBinding, VaultCustody, VaultStore, VaultStoreError, ViewerContent,
-    ViewerError,
+    HumanDisclosure, OwnerAuthError, OwnerIdentity, OwnerPresence, RequesterRef, SecureViewerSink,
+    VaultBinding, VaultCustody, VaultStore, VaultStoreError, ViewerContent, ViewerError,
 };
 use std::{
     collections::HashMap,
@@ -138,14 +137,13 @@ async fn tenant_binding_rejects_owner_from_another_tenant() {
         .await
         .unwrap();
     assert!(matches!(
-        h.approve(&req.handle, OwnerAuthProof::from_challenge(c))
-            .await,
+        h.approve(&req.handle, c).await,
         Err(hacienda_backend::disclosure::DisclosureError::UnauthorizedOwner)
     ));
 }
 
 #[tokio::test]
-async fn owner_proof_replay_is_rejected() {
+async fn owner_challenge_replay_is_rejected() {
     let (h, _, _) = engine(
         OwnerIdentity {
             principal_id: "owner".into(),
@@ -168,11 +166,50 @@ async fn owner_proof_replay_is_rejected() {
         .prepare(&req.handle, hacienda_backend::DisclosureAction::Approve)
         .await
         .unwrap();
-    let p = OwnerAuthProof::from_challenge(c);
-    assert!(h.approve(&req.handle, p.clone()).await.is_ok());
+    assert!(h.approve(&req.handle, c.clone()).await.is_ok());
     assert!(matches!(
-        h.approve(&req.handle, p).await,
+        h.approve(&req.handle, c).await,
         Err(hacienda_backend::disclosure::DisclosureError::ChallengeRequired)
+    ));
+}
+
+#[tokio::test]
+async fn approval_and_viewer_challenges_cannot_be_confused() {
+    let (h, _, _) = engine(
+        OwnerIdentity {
+            principal_id: "owner".into(),
+            tenant_id: TENANT.into(),
+            method: "test".into(),
+        },
+        RAW,
+    );
+    let req = h
+        .request(
+            DisclosureScope::Entity {
+                token: TOKEN.into(),
+            },
+            requester(),
+            binding(),
+        )
+        .await
+        .unwrap();
+    let approval = h
+        .prepare(&req.handle, hacienda_backend::DisclosureAction::Approve)
+        .await
+        .unwrap();
+    let viewer = h
+        .prepare(&req.handle, hacienda_backend::DisclosureAction::OpenViewer)
+        .await
+        .unwrap();
+    assert!(matches!(
+        h.approve(&req.handle, approval).await,
+        Err(hacienda_backend::disclosure::DisclosureError::OwnerAuthFailed)
+    ));
+    assert!(matches!(
+        h.open_viewer(&req.handle, viewer).await,
+        Err(hacienda_backend::disclosure::DisclosureError::Terminal(
+            "not-approved"
+        ))
     ));
 }
 
@@ -211,19 +248,16 @@ async fn markup_scope_is_rejected_and_raw_markup_stays_out_of_evidence() {
         .prepare(&req.handle, hacienda_backend::DisclosureAction::Approve)
         .await
         .unwrap();
-    h.approve(&req.handle, OwnerAuthProof::from_challenge(c))
-        .await
-        .unwrap();
+    h.approve(&req.handle, c).await.unwrap();
     let c = h
         .prepare(&req.handle, hacienda_backend::DisclosureAction::OpenViewer)
         .await
         .unwrap();
-    h.open_viewer(&req.handle, OwnerAuthProof::from_challenge(c))
-        .await
-        .unwrap();
+    h.open_viewer(&req.handle, c).await.unwrap();
     assert_eq!(viewer.0.lock().unwrap().as_slice(), &[RAW.to_owned()]);
     let encoded = serde_json::to_string(&*audit.0.lock().unwrap()).unwrap();
     assert!(!encoded.contains(RAW));
+    assert!(!encoded.contains(TOKEN));
 }
 
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]

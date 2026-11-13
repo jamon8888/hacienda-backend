@@ -145,7 +145,9 @@ impl DisclosureChallenge {
         rand::rng().fill_bytes(&mut nonce);
         Self {
             handle: handle.to_owned(),
-            scope: scope.reference().to_owned(),
+            // Token references are reversible identifiers; bind to a digest
+            // in challenges and metadata so they never enter IPC/audit.
+            scope: hash_reference(scope.reference()),
             principal: requester.principal_id.clone(),
             tenant: requester.tenant_id.clone(),
             action,
@@ -155,26 +157,6 @@ impl DisclosureChallenge {
     }
     pub fn canonical_bytes(&self) -> Vec<u8> {
         serde_json::to_vec(self).expect("challenge is serializable")
-    }
-}
-
-/// A proof contains no secret and is not accepted unless the platform proof
-/// for this exact challenge succeeds.  It is intentionally non-serializable.
-#[derive(Clone)]
-pub struct OwnerAuthProof {
-    challenge: DisclosureChallenge,
-}
-impl OwnerAuthProof {
-    pub fn from_challenge(challenge: DisclosureChallenge) -> Self {
-        Self { challenge }
-    }
-    pub fn challenge(&self) -> &DisclosureChallenge {
-        &self.challenge
-    }
-}
-impl std::fmt::Debug for OwnerAuthProof {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("OwnerAuthProof(REDACTED)")
     }
 }
 
@@ -427,6 +409,25 @@ impl HumanDisclosure {
         })
     }
 
+    pub async fn status_for(
+        &self,
+        handle: &str,
+        principal_id: &str,
+        tenant_id: &str,
+    ) -> Result<StatusView, DisclosureError> {
+        let mut g = self.requests.lock().await;
+        let r = g.get_mut(handle).ok_or(DisclosureError::UnknownHandle)?;
+        if r.requester.principal_id != principal_id || r.requester.tenant_id != tenant_id {
+            return Err(DisclosureError::UnknownHandle);
+        }
+        self.expire(r).await?;
+        Ok(StatusView {
+            handle: r.handle.clone(),
+            status: r.status,
+            expires_at: r.expires_at.to_rfc3339(),
+        })
+    }
+
     pub async fn pending_for_owner(&self) -> Vec<PendingSummary> {
         let g = self.requests.lock().await;
         g.values()
@@ -434,7 +435,7 @@ impl HumanDisclosure {
             .map(|r| PendingSummary {
                 handle: r.handle.clone(),
                 scope_kind: r.scope.kind().into(),
-                scope_ref: r.scope.reference().into(),
+                scope_ref: hash_reference(r.scope.reference()),
                 principal_id: r.requester.principal_id.clone(),
                 tenant_id: r.requester.tenant_id.clone(),
                 expires_at: r.expires_at.to_rfc3339(),
@@ -462,12 +463,12 @@ impl HumanDisclosure {
     pub async fn approve(
         &self,
         handle: &str,
-        proof: OwnerAuthProof,
+        challenge: DisclosureChallenge,
     ) -> Result<DisclosureStatus, DisclosureError> {
         let mut g = self.requests.lock().await;
         let r = g.get_mut(handle).ok_or(DisclosureError::UnknownHandle)?;
         self.expire(r).await?;
-        self.verify(r, proof, DisclosureAction::Approve).await?;
+        self.verify(r, challenge, DisclosureAction::Approve).await?;
         r.status = DisclosureStatus::Approved;
         if self
             .audit
@@ -484,11 +485,11 @@ impl HumanDisclosure {
     pub async fn deny(
         &self,
         handle: &str,
-        proof: OwnerAuthProof,
+        challenge: DisclosureChallenge,
     ) -> Result<DisclosureStatus, DisclosureError> {
         self.transition(
             handle,
-            proof,
+            challenge,
             DisclosureAction::Deny,
             DisclosureStatus::Denied,
             DisclosureEvent::Denied,
@@ -498,11 +499,11 @@ impl HumanDisclosure {
     pub async fn cancel(
         &self,
         handle: &str,
-        proof: OwnerAuthProof,
+        challenge: DisclosureChallenge,
     ) -> Result<DisclosureStatus, DisclosureError> {
         self.transition(
             handle,
-            proof,
+            challenge,
             DisclosureAction::Cancel,
             DisclosureStatus::Cancelled,
             DisclosureEvent::Cancelled,
@@ -513,7 +514,7 @@ impl HumanDisclosure {
     async fn transition(
         &self,
         handle: &str,
-        proof: OwnerAuthProof,
+        challenge: DisclosureChallenge,
         action: DisclosureAction,
         target: DisclosureStatus,
         event: DisclosureEvent,
@@ -521,7 +522,7 @@ impl HumanDisclosure {
         let mut g = self.requests.lock().await;
         let r = g.get_mut(handle).ok_or(DisclosureError::UnknownHandle)?;
         self.expire(r).await?;
-        self.verify(r, proof, action).await?;
+        self.verify(r, challenge, action).await?;
         r.status = target;
         self.audit
             .record(self.row(r, event, "accepted", None))
@@ -533,7 +534,7 @@ impl HumanDisclosure {
     pub async fn open_viewer(
         &self,
         handle: &str,
-        proof: OwnerAuthProof,
+        challenge: DisclosureChallenge,
     ) -> Result<ViewerSessionMeta, DisclosureError> {
         let mut g = self.requests.lock().await;
         let r = g.get_mut(handle).ok_or(DisclosureError::UnknownHandle)?;
@@ -541,7 +542,9 @@ impl HumanDisclosure {
         if r.status != DisclosureStatus::Approved {
             return Err(DisclosureError::Terminal("not-approved"));
         }
-        let owner = self.verify(r, proof, DisclosureAction::OpenViewer).await?;
+        let owner = self
+            .verify(r, challenge, DisclosureAction::OpenViewer)
+            .await?;
         if r.approved_owner.as_ref() != Some(&owner) {
             return Err(DisclosureError::UnauthorizedOwner);
         }
@@ -600,13 +603,13 @@ impl HumanDisclosure {
     async fn verify(
         &self,
         r: &mut RequestRecord,
-        proof: OwnerAuthProof,
+        challenge: DisclosureChallenge,
         action: DisclosureAction,
     ) -> Result<OwnerIdentity, DisclosureError> {
         let Some(expected) = r.challenge.take() else {
             return Err(DisclosureError::ChallengeRequired);
         };
-        if expected.action != action || expected != proof.challenge || r.challenge_used {
+        if expected.action != action || expected != challenge || r.challenge_used {
             return Err(DisclosureError::OwnerAuthFailed);
         }
         let identity = self
@@ -652,7 +655,7 @@ impl HumanDisclosure {
             request_id: r.id.clone(),
             handle_hash: r.handle_hash.clone(),
             scope_kind: r.scope.kind().into(),
-            scope_ref: r.scope.reference().into(),
+            scope_ref: hash_reference(r.scope.reference()),
             principal_id: r.requester.principal_id.clone(),
             tenant_id: r.requester.tenant_id.clone(),
             outcome,
@@ -677,6 +680,9 @@ fn random_bytes() -> [u8; 32] {
 }
 fn hash(s: &str) -> String {
     blake3::hash(s.as_bytes()).to_hex().to_string()
+}
+fn hash_reference(s: &str) -> String {
+    format!("blake3:{}", hash(s))
 }
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()

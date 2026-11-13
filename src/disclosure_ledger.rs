@@ -265,15 +265,12 @@ impl EvidenceLedger {
 fn validate_entry(entry: &DisclosureAuditEntry) -> Result<()> {
     if entry.request_id.is_empty()
         || entry.handle_hash.len() != 64
+        || !entry.handle_hash.chars().all(|c| c.is_ascii_hexdigit())
         || entry.principal_id.is_empty()
         || entry.tenant_id.is_empty()
-        || entry.scope_ref.len() > 256
-        || entry.scope_ref.contains('<')
-        || entry.scope_ref.contains('>')
-        || entry.scope_ref.contains('\n')
-        || entry.scope_ref.contains('\r')
-        || (entry.scope_kind == "entity"
-            && !(entry.scope_ref.starts_with('[') && entry.scope_ref.ends_with(']')))
+        || entry.scope_ref.len() != 71
+        || !entry.scope_ref.starts_with("blake3:")
+        || !entry.scope_ref[7..].chars().all(|c| c.is_ascii_hexdigit())
     {
         bail!("disclosure evidence metadata rejected");
     }
@@ -310,7 +307,7 @@ mod tests {
                 request_id: "request".into(),
                 handle_hash: "a".repeat(64),
                 scope_kind: "entity".into(),
-                scope_ref: "[EMAIL_1]".into(),
+                scope_ref: format!("blake3:{}", "a".repeat(64)),
                 principal_id: "agent".into(),
                 tenant_id: "tenant".into(),
                 outcome: "accepted",

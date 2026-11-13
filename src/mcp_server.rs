@@ -6,6 +6,7 @@
 use axum::{
     Router,
     extract::State,
+    http::{HeaderMap, StatusCode, header::AUTHORIZATION},
     response::Json,
     routing::{get, post},
 };
@@ -33,6 +34,7 @@ use crate::{
     authz::{AuthzError, FolderRoot, attach_local_doc},
     mcp_types::{Capability, Principal, PrincipalResolver, ResolutionContext},
     search::{SearchFilter, SearchParams, TenantSearchEngineManager},
+    sidecar::OpaqueDisclosureGateway,
 };
 
 #[cfg(feature = "basemind")]
@@ -96,6 +98,9 @@ pub struct ServerState {
     /// Tenant-scoped and sync-wired; empty means attach fails closed. Durable
     /// cross-restart persistence is tracked by #21 (ingestion pipeline).
     pub processed_index: Arc<RwLock<HashMap<String, HashMap<PathBuf, String>>>>,
+    /// Authenticated sidecar client. It returns only opaque disclosure
+    /// handles/status; approval and viewer-open are never MCP operations.
+    pub disclosure_gateway: Option<Arc<dyn OpaqueDisclosureGateway>>,
 }
 
 /// MCP server handler.
@@ -119,8 +124,14 @@ where
         registry.register(sync_tool_schema(), Capability::Sync);
         registry.register(status_tool_schema(), Capability::Status);
         registry.register(attach_local_doc_tool_schema(), Capability::AttachLocalDoc);
-        // TODO(#29/#23): disclosure tools remain intentionally disabled until their
-        // authenticated owner-side contracts are implemented.
+        registry.register(
+            request_human_disclosure_tool_schema(),
+            Capability::HumanDisclosureRequest,
+        );
+        registry.register(
+            disclosure_status_tool_schema(),
+            Capability::DisclosureStatus,
+        );
         registry.register(graph_entities_tool_schema(), Capability::GraphRag);
         registry.register(graph_rag_tool_schema(), Capability::GraphRag);
 
@@ -134,6 +145,7 @@ where
                 audit_log: None,
                 folder_roots: HashMap::new(),
                 processed_index: Arc::new(RwLock::new(HashMap::new())),
+                disclosure_gateway: None,
             },
         }
     }
@@ -173,6 +185,11 @@ where
     /// Attach audit log for WORM audit trail.
     pub fn with_audit_log(mut self, audit_log: Arc<AuditLog>) -> Self {
         self.state.audit_log = Some(audit_log);
+        self
+    }
+
+    pub fn with_disclosure_gateway(mut self, gateway: Arc<dyn OpaqueDisclosureGateway>) -> Self {
+        self.state.disclosure_gateway = Some(gateway);
         self
     }
 
@@ -568,6 +585,94 @@ where
                 .map_err(|_| ErrorData::internal_error("audit unavailable", None))?;
                 CallToolResult::success(vec![ContentBlock::text(
                     serde_json::json!({"reference": clean.token}).to_string(),
+                )])
+            }
+            "request_human_disclosure" => {
+                if !has_cap(Capability::HumanDisclosureRequest) {
+                    return Err(ErrorData::invalid_params(
+                        "principal lacks disclosure capability",
+                        None,
+                    ));
+                }
+                let args = request
+                    .arguments
+                    .clone()
+                    .ok_or_else(|| ErrorData::invalid_params("missing arguments", None))?;
+                let tenant = args
+                    .get("tenant_id")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| ErrorData::invalid_params("tenant unauthorized", None))?;
+                let token = args
+                    .get("token")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| ErrorData::invalid_params("invalid disclosure scope", None))?;
+                let engine = args
+                    .get("engine_fingerprint")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| ErrorData::invalid_params("invalid disclosure binding", None))?;
+                let document = args
+                    .get("document_fingerprint")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| ErrorData::invalid_params("invalid disclosure binding", None))?;
+                if !principal.tenant_ids.contains(tenant) {
+                    return Err(ErrorData::invalid_params("tenant unauthorized", None));
+                }
+                let gateway = self.state.disclosure_gateway.as_ref().ok_or_else(|| {
+                    ErrorData::internal_error("disclosure sidecar unavailable", None)
+                })?;
+                let result = gateway
+                    .request(
+                        &principal.id,
+                        tenant,
+                        crate::disclosure::DisclosureScope::Entity {
+                            token: token.into(),
+                        },
+                        crate::disclosure::VaultBinding {
+                            engine_era_fingerprint: engine.into(),
+                            document_fingerprint: document.into(),
+                        },
+                    )
+                    .await
+                    .map_err(|_| ErrorData::internal_error("disclosure unavailable", None))?;
+                // The gateway result is intentionally the opaque handle/status
+                // schema; no proof, approval, viewer, or content field exists.
+                CallToolResult::success(vec![ContentBlock::text(
+                    serde_json::to_string(&result)
+                        .map_err(|_| ErrorData::internal_error("serialization failed", None))?,
+                )])
+            }
+            "disclosure_status" => {
+                if !has_cap(Capability::DisclosureStatus) {
+                    return Err(ErrorData::invalid_params(
+                        "principal lacks disclosure capability",
+                        None,
+                    ));
+                }
+                let args = request
+                    .arguments
+                    .clone()
+                    .ok_or_else(|| ErrorData::invalid_params("missing arguments", None))?;
+                let tenant = args
+                    .get("tenant_id")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| ErrorData::invalid_params("tenant unauthorized", None))?;
+                let handle = args
+                    .get("handle")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| ErrorData::invalid_params("invalid disclosure handle", None))?;
+                if !principal.tenant_ids.contains(tenant) {
+                    return Err(ErrorData::invalid_params("tenant unauthorized", None));
+                }
+                let gateway = self.state.disclosure_gateway.as_ref().ok_or_else(|| {
+                    ErrorData::internal_error("disclosure sidecar unavailable", None)
+                })?;
+                let result = gateway
+                    .status(&principal.id, tenant, handle)
+                    .await
+                    .map_err(|_| ErrorData::internal_error("disclosure unavailable", None))?;
+                CallToolResult::success(vec![ContentBlock::text(
+                    serde_json::to_string(&result)
+                        .map_err(|_| ErrorData::internal_error("serialization failed", None))?,
                 )])
             }
             "graph_entities" => {
@@ -1078,6 +1183,49 @@ fn attach_local_doc_tool_schema() -> Tool {
         .with_annotations(ToolAnnotations::with_title("Attach Local Document").read_only(true).destructive(false).idempotent(true).open_world(false))
 }
 
+fn request_human_disclosure_tool_schema() -> Tool {
+    #[derive(Serialize, schemars::JsonSchema)]
+    struct DisclosureRequestArgs {
+        tenant_id: String,
+        /// Pseudonym reference only; the original value is never accepted.
+        token: String,
+        engine_fingerprint: String,
+        document_fingerprint: String,
+    }
+    Tool::new(
+        "request_human_disclosure",
+        "Request owner-side disclosure; returns an opaque handle and status only.",
+        schema_for_type::<DisclosureRequestArgs>(),
+    )
+    .with_annotations(
+        ToolAnnotations::with_title("Request Human Disclosure")
+            .read_only(false)
+            .destructive(false)
+            .idempotent(false)
+            .open_world(false),
+    )
+}
+
+fn disclosure_status_tool_schema() -> Tool {
+    #[derive(Serialize, schemars::JsonSchema)]
+    struct DisclosureStatusArgs {
+        tenant_id: String,
+        handle: String,
+    }
+    Tool::new(
+        "disclosure_status",
+        "Poll owner-side disclosure status; returns metadata only.",
+        schema_for_type::<DisclosureStatusArgs>(),
+    )
+    .with_annotations(
+        ToolAnnotations::with_title("Disclosure Status")
+            .read_only(true)
+            .destructive(false)
+            .idempotent(true)
+            .open_world(false),
+    )
+}
+
 fn graph_entities_tool_schema() -> Tool {
     #[derive(Serialize, schemars::JsonSchema)]
     struct GraphEntitiesArgs {
@@ -1214,14 +1362,120 @@ fn parse_search_params(
 
 /// HTTP handlers
 async fn mcp_handler<R>(
-    State((_state, _resolver)): State<(ServerState, Arc<R>)>,
-    axum::extract::Json(_request): axum::extract::Json<Value>,
-) -> Result<Json<Value>, axum::http::StatusCode>
+    State((state, resolver)): State<(ServerState, Arc<R>)>,
+    headers: HeaderMap,
+    axum::extract::Json(request): axum::extract::Json<Value>,
+) -> Result<Json<Value>, StatusCode>
 where
     R: PrincipalResolver + Send + Sync + 'static,
 {
-    warn!("MCP HTTP handler not fully implemented — use stdio transport");
-    Err(axum::http::StatusCode::NOT_IMPLEMENTED)
+    let id = request.get("id").cloned().unwrap_or(Value::Null);
+    let principal = resolver
+        .resolve(ResolutionContext {
+            transport: "http".into(),
+            auth_header: headers
+                .get(AUTHORIZATION)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_owned),
+            peer_addr: None,
+        })
+        .await
+        .map_err(|_| StatusCode::UNAUTHORIZED)?;
+    let method = request.get("method").and_then(Value::as_str).unwrap_or("");
+    let result = match method {
+        "tools/list" => {
+            let tools = state.registry.read().await.available_tools(&principal);
+            serde_json::json!({ "tools": tools })
+        }
+        "tools/call" => {
+            let params = request
+                .get("params")
+                .and_then(Value::as_object)
+                .ok_or(StatusCode::BAD_REQUEST)?;
+            let name = params
+                .get("name")
+                .and_then(Value::as_str)
+                .ok_or(StatusCode::BAD_REQUEST)?;
+            let args = params
+                .get("arguments")
+                .and_then(Value::as_object)
+                .cloned()
+                .unwrap_or_default();
+            let has_cap = |cap: Capability| principal.capabilities.contains(&cap);
+            let text = match name {
+                // Streamable HTTP has the same closed disclosure contract as
+                // stdio: only opaque request/status operations are admitted.
+                "request_human_disclosure" if has_cap(Capability::HumanDisclosureRequest) => {
+                    let tenant = args
+                        .get("tenant_id")
+                        .and_then(Value::as_str)
+                        .ok_or(StatusCode::BAD_REQUEST)?;
+                    let token = args
+                        .get("token")
+                        .and_then(Value::as_str)
+                        .ok_or(StatusCode::BAD_REQUEST)?;
+                    let engine = args
+                        .get("engine_fingerprint")
+                        .and_then(Value::as_str)
+                        .ok_or(StatusCode::BAD_REQUEST)?;
+                    let document = args
+                        .get("document_fingerprint")
+                        .and_then(Value::as_str)
+                        .ok_or(StatusCode::BAD_REQUEST)?;
+                    if !principal.tenant_ids.contains(tenant) {
+                        return Err(StatusCode::FORBIDDEN);
+                    }
+                    let gateway = state
+                        .disclosure_gateway
+                        .as_ref()
+                        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+                    let result = gateway
+                        .request(
+                            &principal.id,
+                            tenant,
+                            crate::disclosure::DisclosureScope::Entity {
+                                token: token.into(),
+                            },
+                            crate::disclosure::VaultBinding {
+                                engine_era_fingerprint: engine.into(),
+                                document_fingerprint: document.into(),
+                            },
+                        )
+                        .await
+                        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+                    serde_json::to_string(&result).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+                }
+                "disclosure_status" if has_cap(Capability::DisclosureStatus) => {
+                    let tenant = args
+                        .get("tenant_id")
+                        .and_then(Value::as_str)
+                        .ok_or(StatusCode::BAD_REQUEST)?;
+                    let handle = args
+                        .get("handle")
+                        .and_then(Value::as_str)
+                        .ok_or(StatusCode::BAD_REQUEST)?;
+                    if !principal.tenant_ids.contains(tenant) {
+                        return Err(StatusCode::FORBIDDEN);
+                    }
+                    let gateway = state
+                        .disclosure_gateway
+                        .as_ref()
+                        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+                    let result = gateway
+                        .status(&principal.id, tenant, handle)
+                        .await
+                        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+                    serde_json::to_string(&result).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+                }
+                _ => return Err(StatusCode::NOT_FOUND),
+            };
+            serde_json::json!({ "content": [{ "type": "text", "text": text }] })
+        }
+        _ => return Err(StatusCode::NOT_FOUND),
+    };
+    Ok(Json(
+        serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": result }),
+    ))
 }
 
 async fn sse_handler<R>(
@@ -1250,6 +1504,14 @@ mod authz_manifest_tests {
         registry.register(sync_tool_schema(), Capability::Sync);
         registry.register(status_tool_schema(), Capability::Status);
         registry.register(attach_local_doc_tool_schema(), Capability::AttachLocalDoc);
+        registry.register(
+            request_human_disclosure_tool_schema(),
+            Capability::HumanDisclosureRequest,
+        );
+        registry.register(
+            disclosure_status_tool_schema(),
+            Capability::DisclosureStatus,
+        );
         let principal = Principal {
             id: "p".into(),
             name: "p".into(),
@@ -1258,6 +1520,8 @@ mod authz_manifest_tests {
                 Capability::Sync,
                 Capability::Status,
                 Capability::AttachLocalDoc,
+                Capability::HumanDisclosureRequest,
+                Capability::DisclosureStatus,
             ],
             tenant_ids: HashSet::from(["t".into()]),
         };
@@ -1270,14 +1534,30 @@ mod authz_manifest_tests {
         assert!(names.contains("sync"));
         assert!(names.contains("status"));
         assert!(names.contains("attach_local_doc"));
+        assert!(names.contains("request_human_disclosure"));
+        assert!(names.contains("disclosure_status"));
         for absent in [
             "rehydrate",
-            "request_human_disclosure",
-            "disclosure_status",
+            "approve_human_disclosure",
+            "deny_human_disclosure",
+            "cancel_human_disclosure",
             "open_viewer",
             "native_viewer",
         ] {
             assert!(!names.contains(absent));
+        }
+
+        for tool in registry.available_tools(&principal) {
+            if tool.name == "request_human_disclosure" || tool.name == "disclosure_status" {
+                let schema = serde_json::to_string(&tool.input_schema).unwrap();
+                for forbidden in ["approve", "open_viewer", "raw", "content", "value"] {
+                    assert!(
+                        !schema.contains(forbidden),
+                        "{forbidden} leaked in {}",
+                        tool.name
+                    );
+                }
+            }
         }
     }
 

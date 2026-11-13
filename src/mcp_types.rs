@@ -35,6 +35,10 @@ pub enum Capability {
     GraphRag,
     /// Can attach an already-processed document reference.
     AttachLocalDoc,
+    /// Create an owner-side disclosure request; returns only an opaque handle.
+    HumanDisclosureRequest,
+    /// Poll an owner-side disclosure request; metadata only.
+    DisclosureStatus,
 }
 
 /// Resolves an MCP connection to a Principal.

@@ -88,18 +88,49 @@ pub fn load_vault_map_verified<P: AsRef<Path>, M: AsRef<Path>>(
     }
     // The manifest's Gaze session material is itself an encrypted artifact;
     // a metadata-only manifest must not be treated as sufficient authority.
-    let _protected_snapshot = decrypt_vault_blob(
+    let protected_snapshot = decrypt_vault_blob(
         &manifest.gaze_manifest,
         manifest.fingerprint.as_str(),
         &expected_binding,
         provider,
     )
     .map_err(|e| RehydrationError::Decryption(e.to_string()))?;
+    // Import the encrypted Gaze SensitiveSnapshot before accepting the xberg
+    // map.  A manifest envelope that merely decrypts as arbitrary bytes is not
+    // sufficient restore authority; the signed Gaze session must parse and
+    // rehydrate successfully under the same document/engine binding.
+    let gaze_session = gaze::Session::import(gaze::SensitiveSnapshot::from(protected_snapshot))
+        .map_err(|e| RehydrationError::Decryption(format!("gaze snapshot restore failed: {e}")))?;
+    if gaze_session.audit_session_id().is_empty() {
+        return Err(RehydrationError::Decryption(
+            "gaze snapshot missing session identity".to_owned(),
+        ));
+    }
     // The expected values above come from the requested artifact/document, not
     // from the envelope, and are checked before custody/decryption.
     let plaintext = decrypt_vault_blob(&blob, &manifest.fingerprint.0, &expected_binding, provider)
         .map_err(|e| RehydrationError::Decryption(e.to_string()))?;
-    serde_json::from_slice(&plaintext).map_err(|e| RehydrationError::Decryption(e.to_string()))
+    let map: RehydrationMap = serde_json::from_slice(&plaintext)
+        .map_err(|e| RehydrationError::Decryption(e.to_string()))?;
+    // A decryptable JSON object is not necessarily an xberg rehydration map.
+    // Validate token grammar independently so a substituted map cannot make
+    // the session restore appear valid merely because the manifest decrypts.
+    if map.is_empty()
+        || map.keys().any(|token| {
+            token.len() > 256
+                || !token.starts_with('[')
+                || !token.ends_with(']')
+                || token.contains('<')
+                || token.contains('>')
+                || token.contains('\n')
+                || token.contains('\r')
+        })
+    {
+        return Err(RehydrationError::Decryption(
+            "xberg map contains invalid token keys".to_owned(),
+        ));
+    }
+    Ok(map)
 }
 
 /// Legacy API retained for callers that do not have the requested manifest.
@@ -175,7 +206,7 @@ fn write_output(content: &str, output_path: Option<&Path>) -> Result<(), Rehydra
 }
 
 /// Main rehydration entry point.
-pub async fn run_rehydrate(
+pub(crate) async fn run_rehydrate(
     args: RehydrateArgs,
     provider: &dyn VaultKeyProvider,
     binding: &PrincipalBinding,
@@ -428,16 +459,17 @@ mod tests {
         )
         .expect("legacy fixture encryption");
         std::fs::write(legacy, legacy_blob).expect("write legacy fixture");
+        let session = gaze::Session::new(gaze::Scope::Conversation("fixture".into()))
+            .expect("fixture gaze session");
+        let snapshot = session
+            .export()
+            .expect("fixture gaze snapshot")
+            .into_bytes();
         let manifest_value = RehydrationManifest {
             fingerprint: EngineEraFingerprint("fingerprint".to_owned()),
             document_binding: "document".to_owned(),
-            gaze_manifest: encrypt_vault_blob(
-                b"session fixture",
-                "fingerprint",
-                "document",
-                provider,
-            )
-            .expect("protected session fixture"),
+            gaze_manifest: encrypt_vault_blob(&snapshot, "fingerprint", "document", provider)
+                .expect("protected session fixture"),
         };
         std::fs::write(
             manifest,

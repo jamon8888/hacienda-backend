@@ -17,16 +17,17 @@ pub mod native_viewer;
 pub mod redactor;
 pub mod rehydration;
 pub mod search;
+pub mod sidecar;
 
 pub use authz::{
     AuthzError, CleanDocumentRef, FolderRoot, PrincipalBinding, PrincipalRole, attach_local_doc,
 };
-pub use cli::{Cli, Commands, DoctorArgs, ExportRecoveryArgs, McpArgs, RehydrateArgs, SyncArgs};
+pub use cli::{Cli, Commands, DoctorArgs, ExportRecoveryArgs, McpArgs, SyncArgs};
 pub use cli_error::CliError;
 pub use config::{ConfigError, HaciendaConfig, RedactionConfig, doctor_checks, load_config};
 pub use disclosure::{
-    DisclosureAction, DisclosureChallenge, DisclosureScope, HumanDisclosure, OwnerAuthProof,
-    OwnerIdentity, RequesterRef, VaultBinding,
+    DisclosureAction, DisclosureChallenge, DisclosureScope, HumanDisclosure, OwnerIdentity,
+    RequesterRef, VaultBinding,
 };
 pub use disclosure_ledger::{
     DisclosureLedger, EvidenceKeyCustody, EvidenceLedger, EvidenceLedgerConfig, FixtureEvidenceKey,
@@ -35,6 +36,9 @@ pub use disclosure_ledger::{
 pub use dual_store::{
     DualStoreError, DualStoreOutput, EngineEraFingerprint, TOKEN_GRAMMAR_VERSION, write_dual_store,
 };
+#[cfg(target_os = "windows")]
+pub use encryption::WindowsCredentialVaultKeyProvider;
+pub use encryption::{VaultKeyProvider, vault_key_provider};
 pub use folder_sync::{
     FolderSync, IndexedDocument, SyncEvent, run_manual_refresh, run_manual_refresh_scoped,
 };
@@ -45,12 +49,14 @@ pub use mcp_server::{McpServer, ToolRegistry};
 pub use mcp_types::{Capability, Principal, PrincipalResolver, ResolutionContext, ResolverError};
 pub use native_viewer::{NativeViewerSink, PlatformOwnerPresence};
 pub use redactor::{BRIDGE_CATEGORY, BridgeError, GazeRedactor, class_label};
-pub use rehydration::{
-    RehydrationAuditRecord, RehydrationError, get_vault_passphrase, log_audit, run_export_recovery,
-    run_rehydrate,
-};
+pub use rehydration::{RehydrationAuditRecord, RehydrationError, log_audit, run_export_recovery};
 pub use search::{
     SearchEngine, SearchFilter, SearchParams, SearchResult, TenantSearchEngineManager,
+};
+pub use sidecar::{
+    AuthenticatedClient, ClientCredential, ClientHello, ClientProof, HmacClientAuthenticator,
+    LocalSidecar, LocalSidecarClient, OpaqueDisclosureGateway, PeerIdentity, SidecarEndpoint,
+    SidecarRequest, SidecarResponse,
 };
 
 /// Crate version, for diagnostics.

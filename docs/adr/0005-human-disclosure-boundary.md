@@ -89,7 +89,7 @@ raw stdout, no unattended `--yes`, and no claim that it is a security boundary.
   owner-authenticated, OS/user-presence-backed channel and complete binding verification.
 - The sidecar rejects spoofed or unauthenticated clients; requests cannot self-approve.
 - Raw viewer content is never sent to an agent-readable IPC destination or through MCP.
-- Production custody requires macOS Keychain; fixed passphrases and insecure local fallbacks are dev/test-only.
+- Production custody requires macOS Keychain or Windows Credential Manager; fixed passphrases and insecure local fallbacks are dev/test-only.
 - Disclosure is deny-by-default, auditable with metadata only, and safe under cancellation, expiry, restart,
   and IPC failure.
 - A transparent proxy or stock Claude Code integration alone does not satisfy these invariants.

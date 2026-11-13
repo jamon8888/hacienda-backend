@@ -1,4 +1,4 @@
-//! CLI for hacienda-backend: rehydration, audit, and doctor commands.
+//! CLI for hacienda-backend: audit, diagnostics, sync, and owner-viewer commands.
 
 use clap::{Args, Parser, Subcommand};
 use std::path::PathBuf;
@@ -16,9 +16,6 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Commands {
-    /// Rehydrate a document or entity from the vault map.
-    Rehydrate(RehydrateArgs),
-
     /// Run doctor checks on configuration and environment.
     Doctor(DoctorArgs),
 
@@ -35,9 +32,13 @@ pub enum Commands {
     NativeViewer,
 }
 
-/// Arguments for the rehydrate command.
+/// Internal arguments used by the guarded library rehydration path.
+///
+/// This is deliberately not a `Commands` variant: raw restoration is only
+/// reachable from the owner-authenticated viewer flow, never from a CLI
+/// command or shell-visible output path.
 #[derive(Args, Debug)]
-pub struct RehydrateArgs {
+pub(crate) struct RehydrateArgs {
     /// Hacienda configuration containing the authenticated principal binding.
     #[arg(long, short = 'c', default_value = "basemind.toml")]
     pub config: PathBuf,
@@ -141,4 +142,15 @@ pub struct McpArgs {
     /// Path to hacienda.toml (for sync tool).
     #[arg(long)]
     pub config: Option<PathBuf>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn raw_rehydrate_command_is_not_exposed() {
+        assert!(Cli::try_parse_from(["hacienda-backend", "rehydrate"]).is_err());
+    }
 }
