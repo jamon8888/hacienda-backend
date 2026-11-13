@@ -676,7 +676,12 @@ pub fn load_config<P: AsRef<Path>>(path: P) -> Result<HaciendaConfig, ConfigErro
         return Err(ConfigError::InvalidFusionK);
     }
     if let Some(weights) = &fusion.weights
-        && [weights.exact, weights.vector, weights.keyword, weights.facet]
+        && [
+            weights.exact,
+            weights.vector,
+            weights.keyword,
+            weights.facet,
+        ]
             .iter()
             .any(|weight| !weight.is_finite() || *weight < 0.0)
     {

@@ -96,9 +96,9 @@ pub struct AuditRecord {
     pub result_summary: String,
     /// Hash of the previous record (genesis uses all-zeros).
     pub previous_hash: String,
-    /// Hash of this record's canonical content (excluding signature).
+    /// Hash of this record's canonical content (excluding record hash and signatures).
     pub record_hash: String,
-    /// Ed25519 signature of the canonical JSON of this record (excluding signature field).
+    /// Ed25519 signature of the canonical JSON of this record (excluding signature fields).
     pub signature: String,
     /// Public key used for verification (base64).
     pub public_key: String,
@@ -111,6 +111,13 @@ impl AuditRecord {
         to_sign.signature = String::new();
         to_sign.public_key = String::new();
         serde_json::to_vec(&to_sign).map_err(|e| anyhow::anyhow!("serialize: {}", e))
+    }
+
+    /// Compute the bytes hashed for this record without creating a circular hash.
+    pub fn hash_bytes(&self) -> Result<Vec<u8>> {
+        let mut to_hash = self.clone();
+        to_hash.record_hash = String::new();
+        to_hash.canonical_bytes()
     }
 }
 
@@ -413,11 +420,12 @@ impl AuditLog {
         record.previous_hash = previous_hash;
 
         // Canonicalize for signing and record_hash.
-        let canonical = record.canonical_bytes()?;
-        let record_hash = Self::compute_record_hash(&canonical, &record.previous_hash);
+        let hash_canonical = record.hash_bytes()?;
+        let record_hash = Self::compute_record_hash(&hash_canonical, &record.previous_hash);
         record.record_hash = record_hash.clone();
 
         // Sign.
+        let canonical = record.canonical_bytes()?;
         let signature = self.signing_key.sign(&canonical);
         record.signature = B64.encode(signature.to_bytes());
         record.public_key = B64.encode(self.verifying_key.to_bytes());
@@ -560,11 +568,8 @@ impl AuditLog {
                     ));
                 }
 
-                // Recompute record_hash.
-                let mut to_verify = record.clone();
-                to_verify.signature = String::new();
-                to_verify.public_key = String::new();
-                let canonical = match serde_json::to_vec(&to_verify) {
+                // Recompute record_hash without including the hash itself.
+                let hash_canonical = match record.hash_bytes() {
                     Ok(c) => c,
                     Err(e) => {
                         errors.push(format!(
@@ -576,7 +581,8 @@ impl AuditLog {
                         continue;
                     }
                 };
-                let computed_hash = Self::compute_record_hash(&canonical, &record.previous_hash);
+                let computed_hash =
+                    Self::compute_record_hash(&hash_canonical, &record.previous_hash);
                 if computed_hash != record.record_hash {
                     errors.push(format!(
                         "Epoch {} line {}: record_hash mismatch",
@@ -585,6 +591,19 @@ impl AuditLog {
                     ));
                 }
                 previous_hash = record.record_hash.clone();
+
+                let canonical = match record.canonical_bytes() {
+                    Ok(c) => c,
+                    Err(e) => {
+                        errors.push(format!(
+                            "Epoch {} line {}: serialize error: {}",
+                            epoch,
+                            line_num + 1,
+                            e
+                        ));
+                        continue;
+                    }
+                };
 
                 // Verify signature against the trusted key (never the record's public_key).
                 if record.public_key != B64.encode(self.verifying_key.to_bytes()) {
