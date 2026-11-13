@@ -11,11 +11,10 @@ use clap::Parser;
 use console::style;
 use hacienda_backend::{
     McpServer, TenantSearchEngineManager,
-    audit::AuditLog,
+    audit::{AuditConfig, AuditLog},
     cli::{Cli, Commands, McpArgs},
     cli_error::CliError,
-    doctor_checks, get_vault_passphrase, load_config, log_audit, run_export_recovery,
-    run_rehydrate,
+    doctor_checks, load_config, log_audit, run_export_recovery, run_rehydrate,
 };
 use std::process;
 use std::sync::Arc;
@@ -61,10 +60,13 @@ fn run_command(cli: Cli) -> Result<(), CliError> {
         Commands::Rehydrate(args) => {
             let config = load_config(&args.config)?;
             let auth = cli_auth(&config, args.tenant.as_deref())?;
-            let passphrase = get_vault_passphrase()?;
+            let provider = hacienda_backend::encryption::vault_key_provider(
+                config.encryption_config(Some(&auth.tenant_id)),
+            )
+            .map_err(|e| CliError::Other(e.to_string()))?;
             let audit = rt.block_on(run_rehydrate(
                 args,
-                &passphrase,
+                provider.as_ref(),
                 &auth.binding,
                 &auth.tenant_id,
             ))?;
@@ -103,10 +105,13 @@ fn run_command(cli: Cli) -> Result<(), CliError> {
         Commands::ExportRecovery(args) => {
             let config = load_config(&args.config)?;
             let auth = cli_auth(&config, args.tenant.as_deref())?;
-            let passphrase = get_vault_passphrase()?;
+            let provider = hacienda_backend::encryption::vault_key_provider(
+                config.encryption_config(Some(&auth.tenant_id)),
+            )
+            .map_err(|e| CliError::Other(e.to_string()))?;
             rt.block_on(run_export_recovery(
                 args,
-                &passphrase,
+                provider.as_ref(),
                 &auth.binding,
                 &auth.tenant_id,
             ))?;
@@ -139,6 +144,10 @@ fn run_command(cli: Cli) -> Result<(), CliError> {
         }
         Commands::Mcp(args) => {
             rt.block_on(run_mcp(args))?;
+        }
+        Commands::NativeViewer => {
+            rt.block_on(hacienda_backend::native_viewer::run_native_viewer_process())
+                .map_err(|e| CliError::Other(e.to_string()))?;
         }
     }
     Ok(())
@@ -175,10 +184,14 @@ async fn run_mcp(args: McpArgs) -> Result<(), CliError> {
             .with_config_path(config_path.clone())
             .with_folder_roots(roots);
         // Initialize audit log next to config file
-        let audit_path = config_path.with_extension("audit.log");
-        let audit_log = AuditLog::new(&audit_path)
-            .await
-            .map_err(|e| CliError::Other(e.to_string()))?;
+        let audit_path = config_path.with_extension("audit");
+        let audit_log = AuditLog::new(AuditConfig {
+            log_dir: audit_path,
+            key_dir: config_path.with_extension("audit-keys"),
+            ..AuditConfig::default()
+        })
+        .await
+        .map_err(|e| CliError::Other(e.to_string()))?;
         server = server.with_audit_log(Arc::new(audit_log));
     }
 

@@ -1270,7 +1270,13 @@ mod authz_manifest_tests {
         assert!(names.contains("sync"));
         assert!(names.contains("status"));
         assert!(names.contains("attach_local_doc"));
-        for absent in ["rehydrate", "request_human_disclosure", "disclosure_status"] {
+        for absent in [
+            "rehydrate",
+            "request_human_disclosure",
+            "disclosure_status",
+            "open_viewer",
+            "native_viewer",
+        ] {
             assert!(!names.contains(absent));
         }
     }

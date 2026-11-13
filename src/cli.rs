@@ -30,6 +30,9 @@ pub enum Commands {
 
     /// Run MCP server (stdio or HTTP).
     Mcp(McpArgs),
+
+    /// Internal dedicated native owner viewer; input is private stdin only.
+    NativeViewer,
 }
 
 /// Arguments for the rehydrate command.

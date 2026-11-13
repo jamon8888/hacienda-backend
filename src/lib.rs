@@ -3,6 +3,7 @@ pub mod authz;
 pub mod cli;
 pub mod cli_error;
 pub mod config;
+pub mod disclosure;
 pub mod disclosure_ledger;
 pub mod dual_store;
 pub mod encryption;
@@ -12,6 +13,7 @@ pub mod index_projection;
 pub mod mcp_resolver;
 pub mod mcp_server;
 pub mod mcp_types;
+pub mod native_viewer;
 pub mod redactor;
 pub mod rehydration;
 pub mod search;
@@ -22,8 +24,13 @@ pub use authz::{
 pub use cli::{Cli, Commands, DoctorArgs, ExportRecoveryArgs, McpArgs, RehydrateArgs, SyncArgs};
 pub use cli_error::CliError;
 pub use config::{ConfigError, HaciendaConfig, RedactionConfig, doctor_checks, load_config};
+pub use disclosure::{
+    DisclosureAction, DisclosureChallenge, DisclosureScope, HumanDisclosure, OwnerAuthProof,
+    OwnerIdentity, RequesterRef, VaultBinding,
+};
 pub use disclosure_ledger::{
-    DisclosureHandle, DisclosureLedger, DisclosureRequest, DisclosureStatus,
+    DisclosureLedger, EvidenceKeyCustody, EvidenceLedger, EvidenceLedgerConfig, FixtureEvidenceKey,
+    MacOsEvidenceKeyCustody, WindowsCredentialEvidenceKeyCustody,
 };
 pub use dual_store::{
     DualStoreError, DualStoreOutput, EngineEraFingerprint, TOKEN_GRAMMAR_VERSION, write_dual_store,
@@ -36,6 +43,7 @@ pub use index_projection::{ProjectionConfig, SensitivityTier, project_document, 
 pub use mcp_resolver::DefaultResolver;
 pub use mcp_server::{McpServer, ToolRegistry};
 pub use mcp_types::{Capability, Principal, PrincipalResolver, ResolutionContext, ResolverError};
+pub use native_viewer::{NativeViewerSink, PlatformOwnerPresence};
 pub use redactor::{BRIDGE_CATEGORY, BridgeError, GazeRedactor, class_label};
 pub use rehydration::{
     RehydrationAuditRecord, RehydrationError, get_vault_passphrase, log_audit, run_export_recovery,
