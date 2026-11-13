@@ -81,7 +81,7 @@ pub enum SidecarRequest {
 pub enum SidecarResponse {
     Request(crate::disclosure::RequestResult),
     Status(crate::disclosure::StatusView),
-    Error { code: &'static str },
+    Error { code: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -111,13 +111,12 @@ pub struct ClientCredential {
 
 impl std::fmt::Debug for ClientCredential {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut debug = f
-            .debug_struct("ClientCredential")
-            .field("client_id", &self.client_id)
-            .field("principal_id", &self.principal_id)
-            .field("tenant_id", &self.tenant_id)
-            .field("pid", &self.pid)
-            .field("executable_digest", &self.executable_digest);
+        let mut debug = f.debug_struct("ClientCredential");
+        debug.field("client_id", &self.client_id);
+        debug.field("principal_id", &self.principal_id);
+        debug.field("tenant_id", &self.tenant_id);
+        debug.field("pid", &self.pid);
+        debug.field("executable_digest", &self.executable_digest);
         #[cfg(windows)]
         debug.field("os_sid", &self.os_sid);
         debug.field("key", &"[REDACTED]").finish()
@@ -388,7 +387,7 @@ impl LocalSidecarClient {
         {
             return Err(SidecarError::Protocol);
         }
-        serde_json::from_str(&line).map_err(|_| SidecarError::Protocol)
+        serde_json::from_str::<SidecarResponse>(&line).map_err(|_| SidecarError::Protocol)
     }
 }
 
@@ -511,7 +510,8 @@ impl LocalSidecar {
                     .peer_cred()
                     .map_err(|_| SidecarError::Authentication)?;
                 let peer = PeerIdentity {
-                    pid: credentials.pid().ok_or(SidecarError::Authentication)?,
+                    pid: u32::try_from(credentials.pid().ok_or(SidecarError::Authentication)?)
+                        .map_err(|_| SidecarError::Authentication)?,
                     uid: Some(credentials.uid()),
                     #[cfg(windows)]
                     sid: None,
@@ -644,7 +644,7 @@ async fn serve_connection<S: AsyncRead + AsyncWrite + Unpin>(
             let _ = write_json(
                 &mut write,
                 &SidecarResponse::Error {
-                    code: "client_unauthorized",
+                    code: "client_unauthorized".into(),
                 },
             )
             .await;
@@ -666,7 +666,7 @@ async fn serve_connection<S: AsyncRead + AsyncWrite + Unpin>(
             } => {
                 if tenant_id != client.tenant_id {
                     SidecarResponse::Error {
-                        code: "tenant_unauthorized",
+                        code: "tenant_unauthorized".into(),
                     }
                 } else {
                     match engine
@@ -682,7 +682,7 @@ async fn serve_connection<S: AsyncRead + AsyncWrite + Unpin>(
                     {
                         Ok(result) => SidecarResponse::Request(result),
                         Err(_) => SidecarResponse::Error {
-                            code: "request_denied",
+                            code: "request_denied".into(),
                         },
                     }
                 }
@@ -693,7 +693,7 @@ async fn serve_connection<S: AsyncRead + AsyncWrite + Unpin>(
             {
                 Ok(status) => SidecarResponse::Status(status),
                 Err(_) => SidecarResponse::Error {
-                    code: "status_unavailable",
+                    code: "status_unavailable".into(),
                 },
             },
         };
@@ -860,7 +860,7 @@ mod tests {
         assert!(!request.contains("open_viewer"));
         assert!(!request.contains("raw"));
         let response = serde_json::to_string(&SidecarResponse::Error {
-            code: "request_denied",
+            code: "request_denied".into(),
         })
         .unwrap();
         assert!(!response.contains("content"));

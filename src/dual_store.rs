@@ -161,7 +161,7 @@ pub async fn write_dual_store(
         // be sufficient to restore a session or a rehydration map.
         let protected_gaze_manifest = encrypt_vault_blob(
             &gaze_manifest,
-            &fingerprint,
+            fingerprint.as_str(),
             &document_binding,
             provider.as_ref(),
         )
