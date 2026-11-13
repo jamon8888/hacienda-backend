@@ -731,9 +731,17 @@ impl AuditMiddleware {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEST_INSTANCE: AtomicU64 = AtomicU64::new(0);
 
     fn test_config() -> AuditConfig {
-        let dir = std::env::temp_dir().join(format!("hacienda-audit-test-{}", std::process::id()));
+        let instance = TEST_INSTANCE.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "hacienda-audit-test-{}-{}",
+            std::process::id(),
+            instance
+        ));
         let _ = std::fs::remove_dir_all(&dir);
         let key_dir = dir.join("keys");
         AuditConfig {

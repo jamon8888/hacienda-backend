@@ -1,5 +1,6 @@
 CARGO ?= $(shell command -v cargo 2>/dev/null || echo $(HOME)/.cargo/bin/cargo)
 FEATURES ?= default
+CONFIG ?= basemind.toml
 RUSTFLAGS ?=
 SCCACHE := $(shell command -v sccache 2>/dev/null || { [ -x "$(HOME)/.local/bin/sccache" ] && echo "$(HOME)/.local/bin/sccache"; })
 ifneq ($(SCCACHE),)
@@ -82,10 +83,12 @@ ci-fast: fmt-check check-fast lint-fast test-fast
 ci-all: fmt-check check-all lint-all test-fast
 
 dev:
-	$(CARGO) run -- mcp --transport stdio
+	# HACIENDA_PRINCIPAL must identify a principal bound in CONFIG.
+	$(CARGO) run -- mcp --config "$(CONFIG)" --transport stdio
 
 dev-http:
-	$(CARGO) run -- mcp --transport http --http-addr 127.0.0.1:8080
+	# HACIENDA_PRINCIPAL must identify a principal bound in CONFIG.
+	$(CARGO) run -- mcp --config "$(CONFIG)" --transport http --http-addr 127.0.0.1:8080
 
 # Full verification mirrors the strict CI commands and is intentionally slower.
 ci-full:

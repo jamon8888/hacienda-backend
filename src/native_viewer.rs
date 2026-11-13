@@ -91,11 +91,11 @@ impl SecureViewerSink for NativeViewerSink {
 pub async fn run_native_viewer_process() -> Result<(), NativeViewerError> {
     #[cfg(target_os = "windows")]
     {
-        return run_windows_viewer().await;
+        run_windows_viewer().await
     }
     #[cfg(target_os = "macos")]
     {
-        return run_macos_viewer().await;
+        run_macos_viewer().await
     }
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {

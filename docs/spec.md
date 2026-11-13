@@ -42,7 +42,7 @@ must have an executable test or an operational gate with the stated outcome:
    rejects the operation and writes no indexable output.
 2. **No raw PII on any agent-facing surface.** MCP tools/resources, capabilities, responses, snippets, status,
    errors, extensions, graph results, transcript entries, and client history contain no raw PII or restore
-   material; tests scan every response and reject any raw value, query, token, map, snapshot, or manifest.
+   material; tests scan every response and reject any raw value, query, reversible or session-scoped token, map, snapshot, or manifest.
 3. **Proxy-owned MCP and canonical transcript.** Clients connect to the stateful local proxy/gateway, not
    directly to a raw-capable backend. The proxy is the sole MCP owner, persists/replays only the canonical
    token-only transcript, and treats transcript or session-state failure as a failed operation.

@@ -643,6 +643,10 @@ pub enum ConfigError {
     MissingEngine,
     #[error("gaze engine requires gaze-assembly feature; rebuild with appropriate features")]
     MissingGazeFeature,
+    #[error("documents.fusion.k must be finite and greater than zero")]
+    InvalidFusionK,
+    #[error("documents.fusion weights must be finite and non-negative")]
+    InvalidFusionWeights,
 }
 
 /// Load and validate `basemind.toml` from the given path.
@@ -665,6 +669,18 @@ pub fn load_config<P: AsRef<Path>>(path: P) -> Result<HaciendaConfig, ConfigErro
         return Err(ConfigError::UnknownEngine {
             engine: config.redaction.engine,
         });
+    }
+
+    let fusion = &config.documents.fusion;
+    if !fusion.k.is_finite() || fusion.k <= 0.0 {
+        return Err(ConfigError::InvalidFusionK);
+    }
+    if let Some(weights) = &fusion.weights
+        && [weights.exact, weights.vector, weights.keyword, weights.facet]
+            .iter()
+            .any(|weight| !weight.is_finite() || *weight < 0.0)
+    {
+        return Err(ConfigError::InvalidFusionWeights);
     }
 
     Ok(config)

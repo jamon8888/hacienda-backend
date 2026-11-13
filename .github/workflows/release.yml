@@ -37,8 +37,9 @@ jobs:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
       - name: Install packaging tools
         run: |
-          apt-get update && apt-get install -y dpkg rpm
+          sudo apt-get update && sudo apt-get install -y dpkg rpm
           cargo install cargo-deb cargo-rpm --locked
+          cargo rpm init
       - name: Build release
         run: cargo build --locked --release --target ${{ matrix.target }} --features basemind,rerank
       - name: Build .deb
@@ -52,13 +53,19 @@ jobs:
         with:
           name: packages-${{ matrix.target }}
           path: |
-            target/${{ matrix.target }}/release/debian/*.deb
+            target/debian/*.deb
             target/${{ matrix.target }}/release/rpmbuild/RPMS/*/*.rpm
+          if-no-files-found: error
 
   package-macos:
     name: Package macOS
     runs-on: macos-15-intel
     needs: [test, security]
+    env:
+      APPLE_DEVELOPER_ID: ${{ secrets.APPLE_DEVELOPER_ID }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      TEAM_ID: ${{ secrets.TEAM_ID }}
+      NOTARY_PASSWORD: ${{ secrets.NOTARY_PASSWORD }}
     steps:
       - uses: actions/checkout@v4
       - uses: rust-lang/setup-rust-toolchain@v1
@@ -82,7 +89,15 @@ jobs:
       - name: Create .pkg
         run: |
           cargo install cargo-bundle --locked
-          cargo bundle --release --format pkg --binary-path target/release/hacienda-backend
+          cargo bundle --release --format osx --binary-path target/release/hacienda-backend
+          mkdir -p target/release/pkgroot/Applications
+          cp -R target/release/bundle/osx/hacienda-backend.app target/release/pkgroot/Applications/
+          pkgbuild \
+            --root target/release/pkgroot \
+            --identifier com.hacienda.backend \
+            --version "${GITHUB_REF_NAME#v}" \
+            --install-location / \
+            target/release/bundle/osx/hacienda-backend-${GITHUB_REF_NAME}-macos.pkg
       - name: Create .dmg
         run: |
           hdiutil create -volname "hacienda-backend" \
@@ -111,6 +126,9 @@ jobs:
     name: Package Windows
     runs-on: windows-latest
     needs: [test, security]
+    env:
+      WINDOWS_CERT: ${{ secrets.WINDOWS_CERT }}
+      WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
     steps:
       - uses: actions/checkout@v4
       - uses: rust-lang/setup-rust-toolchain@v1
@@ -120,14 +138,16 @@ jobs:
       - name: Create .msi
         run: |
           cargo install cargo-wix --locked
+          cargo wix init
           cargo wix --release --no-build
       - name: Sign
         if: env.WINDOWS_CERT != ''
         run: |
-          $cert = [System.Convert]::FromBase64String("${{ secrets.WINDOWS_CERT }}")
-          $pwd = ConvertTo-SecureString -String "${{ secrets.WINDOWS_CERT_PASSWORD }}" -AsPlainText -Force
+          $cert = [System.Convert]::FromBase64String($env:WINDOWS_CERT)
+          [System.IO.File]::WriteAllBytes("cert.pfx", $cert)
+          $pwd = ConvertTo-SecureString -String $env:WINDOWS_CERT_PASSWORD -AsPlainText -Force
           Import-PfxCertificate -FilePath cert.pfx -CertStoreLocation Cert:\CurrentUser\My -Password $pwd
-          signtool sign /f cert.pfx /p ${{ secrets.WINDOWS_CERT_PASSWORD }} \
+          signtool sign /f cert.pfx /p $env:WINDOWS_CERT_PASSWORD \
             /tr http://timestamp.digicert.com /td sha256 /fd sha256 \
             target/wix/*.msi
       - name: Upload Windows artifacts
@@ -151,9 +171,12 @@ jobs:
           cd mcp-extension
           npm ci
           npm run build
-          npm version ${{ github.ref_name }}
+          npm version "$RELEASE_VERSION" --allow-same-version --no-git-tag-version
+        env:
+          RELEASE_VERSION: ${{ github.ref_name }}
       - name: Publish to npm
         run: npm publish --access public
+        working-directory: mcp-extension
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
@@ -169,11 +192,11 @@ jobs:
       - uses: softprops/action-gh-release@v1
         with:
           files: |
-            artifacts/packages-*/*.deb
-            artifacts/packages-*/*.rpm
-            artifacts/packages-macos/*.pkg
-            artifacts/packages-macos/*.dmg
-            artifacts/packages-windows/*.msi
+            artifacts/**/*.deb
+            artifacts/**/*.rpm
+            artifacts/**/*.pkg
+            artifacts/**/*.dmg
+            artifacts/**/*.msi
           generate_release_notes: true
           draft: false
           prerelease: false

@@ -1187,7 +1187,7 @@ fn request_human_disclosure_tool_schema() -> Tool {
     #[derive(Serialize, schemars::JsonSchema)]
     struct DisclosureRequestArgs {
         tenant_id: String,
-        /// Pseudonym reference only; the original value is never accepted.
+        /// Pseudonym reference only; original PII is never accepted.
         token: String,
         engine_fingerprint: String,
         document_fingerprint: String,

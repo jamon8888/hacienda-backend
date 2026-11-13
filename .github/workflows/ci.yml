@@ -57,6 +57,9 @@ jobs:
         with:
           version: "25.3"
           repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Install libheif for Basemind
+        if: matrix.features == 'basemind' && runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libheif-dev
       - name: Install ONNX Runtime (macOS Intel)
         if: matrix.onnx
         run: brew install onnxruntime
