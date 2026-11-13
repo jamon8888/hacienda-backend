@@ -188,3 +188,23 @@ Plugins/mods are UX and onboarding only, packaged as `bin/hacienda` plus `.mcp.j
 ADR-0008 proposes a SQLite hash-chain, Ed25519 metadata-only evidence ledger with signed epochs, optional RFC3161 TSA/Sigstore Rekor anchors, signed audit-pack export, offline verification, legal hold/retention, and seeded no-PII-invariant tests. Records contain only fingerprints, hashes, counts, and classes—not raw arguments, values, tokens, maps, snapshots, or content. It proves integrity of traffic that passed through the gateway/MCP gate, not host compromise; stronger isolation is required for that threat.
 
 Current gaps remain: raw rehydrate, owner fallback, fixed key, folder-sync bypass, in-memory index, stdout pollution, HTTP stubs, audit raw arguments, and no gateway, local UI, MCP gate, or ledger. These are not claims of completion.
+
+## 14. Build and CI support matrix
+
+The CI matrix names only configurations that have a declared Cargo feature and
+a matching platform setup:
+
+| Configuration | Cargo features | CI platform | ONNX Runtime setup |
+| --- | --- | --- | --- |
+| Default | none | Ubuntu and Intel macOS | Downloaded on Ubuntu; Homebrew dynamic library on Intel macOS |
+| Vector search | `basemind` | Ubuntu and Intel macOS | Same as the default configuration |
+| Linux reranking | `rerank` | Ubuntu | `ort-sys` download-binaries |
+| Intel macOS reranking | `rerank-macos` | `macos-15-intel` | Homebrew dynamic library |
+
+The ONNX jobs are separate from the general verification matrix, but run on
+pull requests and remain release-gating on pushes and reusable release workflow
+calls. Windows packaging currently gates the default configuration only; no
+Windows reranking claim is made by CI. `Cargo.lock` is authoritative and
+build/test/lint commands use
+`--locked`. Intel macOS uses environment-provided ONNX Runtime paths rather
+than a repository or developer-specific absolute path.

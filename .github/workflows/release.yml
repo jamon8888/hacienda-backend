@@ -24,7 +24,6 @@ jobs:
       matrix:
         target:
           - x86_64-unknown-linux-gnu
-          - aarch64-unknown-linux-gnu
     steps:
       - uses: actions/checkout@v4
       - uses: rust-lang/setup-rust-toolchain@v1
@@ -36,13 +35,13 @@ jobs:
           apt-get update && apt-get install -y dpkg rpm
           cargo install cargo-deb cargo-rpm --locked
       - name: Build release
-        run: cargo build --release --target ${{ matrix.target }} --features basemind,rerank
+        run: cargo build --locked --release --target ${{ matrix.target }} --features basemind,rerank
       - name: Build .deb
         if: matrix.target == 'x86_64-unknown-linux-gnu'
-        run: cargo deb --target ${{ matrix.target }}
+        run: cargo deb --no-build --target ${{ matrix.target }}
       - name: Build .rpm
         if: matrix.target == 'x86_64-unknown-linux-gnu'
-        run: cargo rpm --target ${{ matrix.target }}
+        run: cargo rpm build --no-cargo-build --target ${{ matrix.target }}
       - name: Upload Linux artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -53,20 +52,27 @@ jobs:
 
   package-macos:
     name: Package macOS
-    runs-on: macos-latest
+    runs-on: macos-15-intel
     needs: [test, security]
     steps:
       - uses: actions/checkout@v4
       - uses: rust-lang/setup-rust-toolchain@v1
       - uses: Swatinem/rust-cache@v2
-      - name: Build release
+      - name: Install ONNX Runtime
+        run: brew install onnxruntime
+      - name: Configure ONNX Runtime
+        shell: bash
         run: |
-          brew install onnxruntime
-          cargo build --release --features basemind,rerank-macos
+          ort_prefix="$(brew --prefix onnxruntime)"
+          echo "ORT_LIB_PATH=$ort_prefix/lib" >> "$GITHUB_ENV"
+          echo "ORT_DYLIB_PATH=$ort_prefix/lib/libonnxruntime.dylib" >> "$GITHUB_ENV"
+          echo "DYLD_LIBRARY_PATH=$ort_prefix/lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}" >> "$GITHUB_ENV"
+      - name: Build release
+        run: cargo build --locked --release --features basemind,rerank-macos
       - name: Create .pkg
         run: |
           cargo install cargo-bundle --locked
-          cargo bundle --release --format pkg
+          cargo bundle --release --format pkg --binary-path target/release/hacienda-backend
       - name: Create .dmg
         run: |
           hdiutil create -volname "hacienda-backend" \
@@ -100,11 +106,11 @@ jobs:
       - uses: rust-lang/setup-rust-toolchain@v1
       - uses: Swatinem/rust-cache@v2
       - name: Build release
-        run: cargo build --release
+        run: cargo build --locked --release
       - name: Create .msi
         run: |
           cargo install cargo-wix --locked
-          cargo wix --release
+          cargo wix --release --no-build
       - name: Sign
         if: env.WINDOWS_CERT != ''
         run: |

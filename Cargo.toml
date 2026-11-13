@@ -9,15 +9,16 @@ publish = true
 [features]
 default = ["bm25"]
 bm25 = []
-# Vector search via basemind's LanceStore. xberg is resolved from its published revision;
+# Vector search via basemind's LanceStore. xberg is resolved from its pinned published package;
 # no developer-local Cargo patch is part of the supported dependency graph.
 basemind = ["dep:basemind", "dep:lancedb", "dep:arrow", "xberg/embeddings"]
 vector = ["basemind"]
 xberg-formats = ["xberg/formats"]
 # Cross-encoder reranking with ort (bge-reranker-v2-m3 ONNX)
-# On Linux/Windows: uses download-binaries feature
+# On non-macOS targets: uses download-binaries feature.
+# macOS Intel is configured below to use the system ONNX Runtime dynamically.
 rerank = ["dep:ort", "dep:ndarray", "dep:reqwest", "dep:tokenizers", "dep:sha2"]
-# On macOS: uses load-dynamic (requires ONNX Runtime installed via brew install onnxruntime)
+# On macOS: uses load-dynamic (requires ONNX Runtime installed separately).
 rerank-macos = ["rerank", "ort/load-dynamic"]
 
 [dependencies]
@@ -67,15 +68,23 @@ lancedb = { version = "0.40", optional = true }
 arrow = { version = "54", optional = true }
 
 # Optional cross-encoder reranking with ort (bge-reranker-v2-m3 ONNX)
-# On Linux/Windows: uses download-binaries feature
-# On macOS: uses load-dynamic (requires ONNX Runtime installed via brew install onnxruntime)
-ort = { version = "^2.0.0-rc.13", default-features = false, features = ["ndarray", "std", "download-binaries", "tls-rustls"], optional = true }
+# The transitive gaze recognizers use the same `ort` package. Keep the normal
+# dependency portable, then add the download feature only off macOS. This
+# prevents ort-sys from trying to fetch an unavailable Intel macOS archive.
+ort = { version = "^2.0.0-rc.13", default-features = false, features = ["ndarray", "std", "tls-rustls"], optional = true }
 ndarray = { version = "0.16", optional = true }
 reqwest = { version = "0.12", features = ["blocking"], optional = true }
 tokenizers = { version = "0.21", default-features = false, features = ["onig"], optional = true }
 sha2 = { version = "0.10", optional = true }
-# macOS load-dynamic ONNX Runtime is enabled only via the `rerank-macos` feature,
-# not as an unconditional target-specific dependency.
+
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+ort = { version = "^2.0.0-rc.13", default-features = false, features = ["ndarray", "std", "download-binaries", "tls-rustls"], optional = true }
+
+# gaze-recognizers also depends on `ort`. This non-optional target dependency
+# ensures every Intel macOS build uses the same dynamic-linking mode, including
+# the default and basemind configurations that still compile gaze recognizers.
+[target.'cfg(all(target_os = "macos", target_arch = "x86_64"))'.dependencies]
+ort = { version = "^2.0.0-rc.13", default-features = false, features = ["ndarray", "std", "load-dynamic"] }
 
 [dev-dependencies]
 tokio = { version = "1.54.1", features = ["macros", "rt-multi-thread"] }
