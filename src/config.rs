@@ -682,8 +682,8 @@ pub fn load_config<P: AsRef<Path>>(path: P) -> Result<HaciendaConfig, ConfigErro
             weights.keyword,
             weights.facet,
         ]
-            .iter()
-            .any(|weight| !weight.is_finite() || *weight < 0.0)
+        .iter()
+        .any(|weight| !weight.is_finite() || *weight < 0.0)
     {
         return Err(ConfigError::InvalidFusionWeights);
     }
