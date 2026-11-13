@@ -3,6 +3,7 @@
 //! One detection pass produces both stores (ADR-0002). The fingerprint
 //! `engine_id × token_grammar_version × redaction_config` gates all cross-era reuse.
 
+use crate::encryption::{default_vault_key_provider, encrypt_vault_blob};
 use crate::{BRIDGE_CATEGORY, BridgeError, EngineError, GazeEngine};
 use blake3 as blake3_crate;
 use xberg::{
@@ -62,7 +63,18 @@ struct SerializableRedactionConfig {
     findings_offset_encoding: String,
 }
 
-/// Result of a dual-store write: the gaze manifest bytes and the encrypted vault map.
+/// Metadata written alongside the gaze snapshot so rehydration can verify the
+/// vault envelope against an independent artifact before decrypting it.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct RehydrationManifest {
+    pub fingerprint: EngineEraFingerprint,
+    pub document_binding: String,
+    pub gaze_manifest: Vec<u8>,
+}
+
+/// Result of a dual-store write: a protected Gaze snapshot manifest and the
+/// encrypted vault map. Both artifacts are bound to one engine era and
+/// document fingerprint before they can be restored.
 #[derive(Debug)]
 pub struct DualStoreOutput {
     /// Engine-era fingerprint for this write.
@@ -86,6 +98,8 @@ pub enum DualStoreError {
     Bridge(#[from] BridgeError),
     #[error("serialization failed: {0}")]
     Serialization(#[from] serde_json::Error),
+    #[error("vault custody failed: {0}")]
+    Custody(String),
 }
 
 /// Produce dual-store output for a single document.
@@ -131,7 +145,34 @@ pub async fn write_dual_store(
         let shifted_findings = shift_findings(kept_findings, &dropped)?;
         let cfg = findings_config(RedactionStrategy::TokenReplace, shifted_findings);
         let vault_map = redact_capturing_rehydration_map(&mut temp_doc, &cfg).await?;
-        let encrypted_vault = encrypt_vault_map(vault_map)?;
+        let provider =
+            default_vault_key_provider().map_err(|e| DualStoreError::Custody(e.to_string()))?;
+        let document_binding = blake3_crate::hash(document.content.as_bytes())
+            .to_hex()
+            .to_string();
+        let encrypted_vault = encrypt_vault_map(
+            vault_map,
+            &fingerprint,
+            &document_binding,
+            provider.as_ref(),
+        )?;
+        // Protect the Gaze SensitiveSnapshot with the same custody key and
+        // independent document/engine AAD.  A plaintext manifest must never
+        // be sufficient to restore a session or a rehydration map.
+        let protected_gaze_manifest = encrypt_vault_blob(
+            &gaze_manifest,
+            fingerprint.as_str(),
+            &document_binding,
+            provider.as_ref(),
+        )
+        .map_err(|e| DualStoreError::Custody(e.to_string()))?;
+        // Keep binding metadata in the independently supplied manifest artifact;
+        // rehydration checks it before asking custody for the decryption key.
+        let gaze_manifest = serde_json::to_vec(&RehydrationManifest {
+            fingerprint: fingerprint.clone(),
+            document_binding: document_binding.clone(),
+            gaze_manifest: protected_gaze_manifest,
+        })?;
         // Commit the rewritten content back.
         document.content = temp_doc.content;
         document.chunks = temp_doc.chunks;
@@ -304,12 +345,15 @@ fn findings_config(
 }
 
 /// Encrypt the rehydration map to XPII\x01 format.
-fn encrypt_vault_map(map: RehydrationMap) -> Result<Vec<u8>, DualStoreError> {
-    // In production, this would use a key from macOS Keychain.
-    // For now, use a fixed passphrase (TODO: Keychain integration).
-    const TEST_PASSPHRASE: &str = "hacienda-backend-vault-key-v1";
-    xberg::text::redaction::rehydration::encrypt_map(&map, TEST_PASSPHRASE)
-        .map_err(DualStoreError::Xberg)
+fn encrypt_vault_map(
+    map: RehydrationMap,
+    fingerprint: &EngineEraFingerprint,
+    document_binding: &str,
+    provider: &dyn crate::encryption::VaultKeyProvider,
+) -> Result<Vec<u8>, DualStoreError> {
+    let plaintext = serde_json::to_vec(&map)?;
+    encrypt_vault_blob(&plaintext, fingerprint.as_str(), document_binding, provider)
+        .map_err(|e| DualStoreError::Custody(e.to_string()))
 }
 
 /// Token grammar version for fingerprinting.

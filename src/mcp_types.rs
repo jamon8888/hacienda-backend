@@ -4,6 +4,7 @@
 //! to provide per-agent authentication/authorization.
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::future::Future;
 
 /// Principal identity resolved from an MCP connection.
@@ -15,6 +16,9 @@ pub struct Principal {
     pub name: String,
     /// Capabilities granted to this principal.
     pub capabilities: Vec<Capability>,
+    /// Tenants this authenticated principal is bound to; payload IDs never expand this set.
+    #[serde(default)]
+    pub tenant_ids: HashSet<String>,
 }
 
 /// Capabilities that can be granted to a principal.
@@ -23,12 +27,18 @@ pub struct Principal {
 pub enum Capability {
     /// Can call search tool (returns tokenized snippets only).
     Search,
-    /// Can call rehydrate tool (owner-only, per-export review).
-    Rehydrate,
     /// Can call sync tool (trigger incremental/full rebuild).
     Sync,
     /// Can call status tool (index stats, fingerprint, etc.).
     Status,
+    /// Can call graph tools: read-only Cypher over the entity graph and GraphRAG retrieval.
+    GraphRag,
+    /// Can attach an already-processed document reference.
+    AttachLocalDoc,
+    /// Create an owner-side disclosure request; returns only an opaque handle.
+    HumanDisclosureRequest,
+    /// Poll an owner-side disclosure request; metadata only.
+    DisclosureStatus,
 }
 
 /// Resolves an MCP connection to a Principal.
@@ -44,11 +54,6 @@ pub trait PrincipalResolver: Send + Sync + 'static {
         &self,
         ctx: ResolutionContext,
     ) -> impl Future<Output = Result<Principal, ResolverError>> + Send;
-
-    /// Optional: provide a default principal for stdio transport.
-    fn default_principal(&self) -> Option<Principal> {
-        None
-    }
 }
 
 /// Context provided to the resolver during resolution.

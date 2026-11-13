@@ -22,7 +22,10 @@ pub enum CliError {
     Xberg(#[from] xberg::XbergError),
 
     #[error("MCP error: {0}")]
-    Mcp(#[from] rmcp::Error),
+    Mcp(#[from] rmcp::model::ErrorData),
+
+    #[error("Tantivy error: {0}")]
+    Tantivy(#[from] tantivy::TantivyError),
 
     #[error("Configuration load error: {0}")]
     LoadConfig(String),
@@ -35,6 +38,9 @@ pub enum CliError {
 
     #[error("Unknown transport: {0}")]
     UnknownTransport(String),
+
+    #[error("Other error: {0}")]
+    Other(String),
 }
 
 impl From<Box<dyn std::error::Error + Send + Sync + 'static>> for CliError {

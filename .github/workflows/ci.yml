@@ -1,25 +1,149 @@
-name: ci
+name: CI
 
 on:
   push:
     branches: [main]
   pull_request:
+    branches: [main]
+  workflow_call:
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  test:
-    runs-on: macos-latest
+  fmt:
+    name: Format
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
-      - name: Format
+          components: rustfmt
+      - name: Format check
         run: cargo fmt --all --check
+
+  verify:
+    name: Verify (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: default-linux
+            os: ubuntu-latest
+            features: ''
+            onnx: false
+          - name: default-macos-intel
+            os: macos-15-intel
+            features: ''
+            onnx: true
+          - name: basemind-linux
+            os: ubuntu-latest
+            features: basemind
+            onnx: false
+          - name: basemind-macos-intel
+            os: macos-15-intel
+            features: basemind
+            onnx: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Install protoc for Basemind
+        if: matrix.features == 'basemind'
+        uses: arduino/setup-protoc@v3
+        with:
+          version: "25.3"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Install libheif for Basemind
+        if: matrix.features == 'basemind' && runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libheif-dev
+      - name: Install ONNX Runtime (macOS Intel)
+        if: matrix.onnx
+        run: brew install onnxruntime
+      - name: Configure ONNX Runtime (macOS Intel)
+        if: matrix.onnx
+        shell: bash
+        run: |
+          ort_prefix="$(brew --prefix onnxruntime)"
+          echo "ORT_LIB_PATH=$ort_prefix/lib" >> "$GITHUB_ENV"
+          echo "ORT_DYLIB_PATH=$ort_prefix/lib/libonnxruntime.dylib" >> "$GITHUB_ENV"
+          echo "DYLD_LIBRARY_PATH=$ort_prefix/lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}" >> "$GITHUB_ENV"
+      - name: Check
+        env:
+          CARGO_FEATURES: ${{ matrix.features }}
+        run: |
+          if [ -n "$CARGO_FEATURES" ]; then
+            cargo check --locked --all-targets --features "$CARGO_FEATURES"
+          else
+            cargo check --locked --all-targets
+          fi
       - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings
+        env:
+          CARGO_FEATURES: ${{ matrix.features }}
+        run: |
+          if [ -n "$CARGO_FEATURES" ]; then
+            cargo clippy --locked --all-targets --features "$CARGO_FEATURES" -- -D warnings
+          else
+            cargo clippy --locked --all-targets -- -D warnings
+          fi
       - name: Test
-        run: cargo test --all
+        env:
+          CARGO_FEATURES: ${{ matrix.features }}
+        run: |
+          if [ -n "$CARGO_FEATURES" ]; then
+            cargo test --locked --all --features "$CARGO_FEATURES"
+          else
+            cargo test --locked --all
+          fi
+
+  verify-onnx:
+    name: Verify ONNX (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: rerank-linux
+            os: ubuntu-latest
+            features: rerank
+            onnx: false
+          - name: rerank-macos-intel
+            os: macos-15-intel
+            features: rerank-macos
+            onnx: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Install ONNX Runtime (macOS Intel)
+        if: matrix.onnx
+        run: brew install onnxruntime
+      - name: Configure ONNX Runtime (macOS Intel)
+        if: matrix.onnx
+        shell: bash
+        run: |
+          ort_prefix="$(brew --prefix onnxruntime)"
+          echo "ORT_LIB_PATH=$ort_prefix/lib" >> "$GITHUB_ENV"
+          echo "ORT_DYLIB_PATH=$ort_prefix/lib/libonnxruntime.dylib" >> "$GITHUB_ENV"
+          echo "DYLD_LIBRARY_PATH=$ort_prefix/lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}" >> "$GITHUB_ENV"
+      - name: Check
+        run: cargo check --locked --all-targets --features "${{ matrix.features }}"
+      - name: Clippy
+        run: cargo clippy --locked --all-targets --features "${{ matrix.features }}" -- -D warnings
+      - name: Test
+        run: cargo test --locked --all --features "${{ matrix.features }}"
+
+  test-doc:
+    name: Doc Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Test doc
+        run: cargo test --locked --doc

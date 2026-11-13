@@ -319,10 +319,23 @@ impl FolderSync {
         let _ = self.event_tx.try_send(SyncEvent::FullRebuild { reason });
     }
 
-    /// Manual refresh: process all files once (for CLI command).
+    /// Manual refresh: process all files once, clearing the index first (full rebuild).
     pub async fn manual_refresh(&self) {
         self.trigger_full_rebuild("manual refresh".to_owned());
         // Wait for processing (in real impl, would await a completion signal)
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    /// One-shot incremental refresh: index new/changed files without clearing.
+    pub async fn manual_refresh_incremental(&self) {
+        if let Ok(mut entries) = tokio::fs::read_dir(&self.root).await {
+            while let Ok(Some(entry)) = entries.next_entry().await {
+                let path = entry.path();
+                if path.is_file() {
+                    let _ = self.event_tx.try_send(SyncEvent::FileChanged { path });
+                }
+            }
+        }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 
@@ -333,23 +346,59 @@ impl FolderSync {
 }
 
 /// CLI command for manual refresh.
-pub async fn run_manual_refresh(config_path: &std::path::Path) -> Result<(), crate::CliError> {
+///
+/// `full` selects a complete rebuild; otherwise only new/changed files are
+/// (re)indexed. Status goes to stderr and the indexed documents are returned:
+/// stdout may carry the stdio MCP JSON-RPC stream when called from the server.
+/// Scoped refresh used by authenticated MCP/CLI paths. Each supplied root is
+/// processed independently; no current-directory or all-tenant fallback exists.
+pub async fn run_manual_refresh_scoped(
+    config_path: &std::path::Path,
+    tenant_id: &str,
+    roots: &[PathBuf],
+    full: bool,
+) -> Result<Vec<IndexedDocument>, crate::CliError> {
+    let config = crate::load_config(config_path)?;
+    let _tenant = config
+        .get_tenant(tenant_id)
+        .ok_or_else(|| crate::CliError::Other("tenant unavailable".into()))?;
+    let mut all = Vec::new();
+    for root in roots {
+        let sync = FolderSync::new(root.clone(), config.clone());
+        if full {
+            sync.manual_refresh().await;
+        } else {
+            sync.manual_refresh_incremental().await;
+        }
+        all.extend(sync.get_indexed().await);
+    }
+    Ok(all)
+}
+
+pub async fn run_manual_refresh(
+    config_path: &std::path::Path,
+    full: bool,
+) -> Result<Vec<IndexedDocument>, crate::CliError> {
     let config = crate::load_config(config_path)?;
     let sync = FolderSync::new(std::env::current_dir()?, config);
 
     // Trigger manual refresh (one-shot, no watcher needed)
-    sync.manual_refresh().await;
+    if full {
+        sync.manual_refresh().await;
+    } else {
+        sync.manual_refresh_incremental().await;
+    }
 
-    // Print status
+    // Report status on stderr, never stdout (stdio transport safety)
     let indexed = sync.get_indexed().await;
-    println!(
+    eprintln!(
         "{} Indexed {} documents:",
         console::style("✓").green(),
         indexed.len()
     );
-    for doc in indexed {
-        println!("  {} ({})", doc.doc_id, doc.fingerprint.as_str());
+    for doc in &indexed {
+        eprintln!("  {} ({})", doc.doc_id, doc.fingerprint.as_str());
     }
 
-    Ok(())
+    Ok(indexed)
 }

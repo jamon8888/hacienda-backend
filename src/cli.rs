@@ -1,4 +1,4 @@
-//! CLI for hacienda-backend: rehydration, audit, and doctor commands.
+//! CLI for hacienda-backend: owner-reviewed recovery, diagnostics, sync, and viewer commands.
 
 use clap::{Args, Parser, Subcommand};
 use std::path::PathBuf;
@@ -16,7 +16,7 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Commands {
-    /// Rehydrate a document or entity from the vault map.
+    /// Rehydrate one owner-reviewed entity to an explicit output file.
     Rehydrate(RehydrateArgs),
 
     /// Run doctor checks on configuration and environment.
@@ -30,11 +30,19 @@ pub enum Commands {
 
     /// Run MCP server (stdio or HTTP).
     Mcp(McpArgs),
+
+    /// Internal dedicated native owner viewer; input is private stdin only.
+    NativeViewer,
 }
 
-/// Arguments for the rehydrate command.
 #[derive(Args, Debug)]
 pub struct RehydrateArgs {
+    /// Hacienda configuration containing the authenticated principal binding.
+    #[arg(long, short = 'c', default_value = "basemind.toml")]
+    pub config: PathBuf,
+    /// Authorized tenant; omitted only for a single-bound principal.
+    #[arg(long)]
+    pub tenant: Option<String>,
     /// Document ID to rehydrate (required for full document rehydration).
     #[arg(long, short = 'd', conflicts_with = "entity")]
     pub doc_id: Option<String>,
@@ -47,17 +55,21 @@ pub struct RehydrateArgs {
     #[arg(long, short = 'v', required = true)]
     pub vault_map: PathBuf,
 
-    /// Path to the gaze manifest file (optional, for audit context).
-    #[arg(long, short = 'm')]
+    /// Path to the gaze manifest file used for independent binding verification.
+    #[arg(long, short = 'm', required = true)]
     pub manifest: Option<PathBuf>,
 
-    /// Output path for rehydrated content (stdout if omitted).
-    #[arg(long, short = 'o')]
-    pub output: Option<PathBuf>,
+    /// Explicit output path for rehydrated content; stdout is never used.
+    #[arg(long, short = 'o', required = true)]
+    pub output: PathBuf,
 
-    /// Skip interactive confirmation (for scripting).
+    /// Request confirmation bypass; accepted only from an interactive terminal.
     #[arg(long, short = 'y')]
     pub yes: bool,
+
+    /// Path to the original document used to verify the vault binding.
+    #[arg(long)]
+    pub document: Option<PathBuf>,
 }
 
 /// Arguments for the doctor command.
@@ -75,6 +87,12 @@ pub struct DoctorArgs {
 /// Arguments for the export-recovery command.
 #[derive(Args, Debug)]
 pub struct ExportRecoveryArgs {
+    /// Hacienda configuration containing the authenticated principal binding.
+    #[arg(long, short = 'c', default_value = "basemind.toml")]
+    pub config: PathBuf,
+    /// Authorized tenant; omitted only for a single-bound principal.
+    #[arg(long)]
+    pub tenant: Option<String>,
     /// Output path for the encrypted recovery bundle.
     #[arg(long, short = 'o', required = true)]
     pub output: PathBuf,
@@ -86,10 +104,6 @@ pub struct ExportRecoveryArgs {
     /// Path to the gaze manifest file.
     #[arg(long, short = 'm', required = true)]
     pub manifest: PathBuf,
-
-    /// Recovery passphrase (generated if omitted).
-    #[arg(long, short = 'p')]
-    pub passphrase: Option<String>,
 }
 
 /// Arguments for the sync command.
@@ -98,6 +112,10 @@ pub struct SyncArgs {
     /// Path to basemind.toml configuration file.
     #[arg(long, short = 'c', default_value = "basemind.toml")]
     pub config: PathBuf,
+
+    /// Authorized tenant; omitted only when the principal has exactly one binding.
+    #[arg(long)]
+    pub tenant: Option<String>,
 
     /// Run in watch mode (continuous) instead of one-shot refresh.
     #[arg(long, short = 'w')]
@@ -118,4 +136,46 @@ pub struct McpArgs {
     /// HTTP bind address (when transport=http).
     #[arg(long, default_value = "127.0.0.1:8080")]
     pub http_addr: String,
+
+    /// Path to hacienda.toml (for sync tool).
+    #[arg(long)]
+    pub config: Option<PathBuf>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn rehydrate_command_requires_explicit_output() {
+        assert!(
+            Cli::try_parse_from([
+                "hacienda-backend",
+                "rehydrate",
+                "--entity",
+                "[EMAIL_1]",
+                "--vault-map",
+                "vault.json",
+                "--manifest",
+                "manifest.json",
+            ])
+            .is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "hacienda-backend",
+                "rehydrate",
+                "--entity",
+                "[EMAIL_1]",
+                "--vault-map",
+                "vault.json",
+                "--manifest",
+                "manifest.json",
+                "--output",
+                "restored.txt",
+            ])
+            .is_ok()
+        );
+    }
 }
