@@ -32,57 +32,102 @@ jobs:
           - name: default-linux
             os: ubuntu-latest
             features: ''
-          - name: default-macos
-            os: macos-latest
+            onnx: false
+          - name: default-macos-intel
+            os: macos-15-intel
             features: ''
+            onnx: true
           - name: basemind-linux
             os: ubuntu-latest
             features: basemind
-          - name: basemind-macos
-            os: macos-latest
+            onnx: false
+          - name: basemind-macos-intel
+            os: macos-15-intel
             features: basemind
-          - name: rerank-linux
-            os: ubuntu-latest
-            features: rerank
-          - name: rerank-macos
-            os: macos-latest
-            features: rerank-macos
+            onnx: true
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - name: Install macOS ONNX Runtime
-        if: matrix.features == 'rerank-macos'
+      - name: Install ONNX Runtime (macOS Intel)
+        if: matrix.onnx
         run: brew install onnxruntime
+      - name: Configure ONNX Runtime (macOS Intel)
+        if: matrix.onnx
+        shell: bash
+        run: |
+          ort_prefix="$(brew --prefix onnxruntime)"
+          echo "ORT_LIB_PATH=$ort_prefix/lib" >> "$GITHUB_ENV"
+          echo "ORT_DYLIB_PATH=$ort_prefix/lib/libonnxruntime.dylib" >> "$GITHUB_ENV"
+          echo "DYLD_LIBRARY_PATH=$ort_prefix/lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}" >> "$GITHUB_ENV"
       - name: Check
         env:
           CARGO_FEATURES: ${{ matrix.features }}
         run: |
           if [ -n "$CARGO_FEATURES" ]; then
-            cargo check --all-targets --features "$CARGO_FEATURES"
+            cargo check --locked --all-targets --features "$CARGO_FEATURES"
           else
-            cargo check --all-targets
+            cargo check --locked --all-targets
           fi
       - name: Clippy
         env:
           CARGO_FEATURES: ${{ matrix.features }}
         run: |
           if [ -n "$CARGO_FEATURES" ]; then
-            cargo clippy --all-targets --features "$CARGO_FEATURES" -- -D warnings
+            cargo clippy --locked --all-targets --features "$CARGO_FEATURES" -- -D warnings
           else
-            cargo clippy --all-targets -- -D warnings
+            cargo clippy --locked --all-targets -- -D warnings
           fi
       - name: Test
         env:
           CARGO_FEATURES: ${{ matrix.features }}
         run: |
           if [ -n "$CARGO_FEATURES" ]; then
-            cargo test --all --features "$CARGO_FEATURES"
+            cargo test --locked --all --features "$CARGO_FEATURES"
           else
-            cargo test --all
+            cargo test --locked --all
           fi
+
+  verify-onnx:
+    name: Verify ONNX (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: rerank-linux
+            os: ubuntu-latest
+            features: rerank
+            onnx: false
+          - name: rerank-macos-intel
+            os: macos-15-intel
+            features: rerank-macos
+            onnx: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Install ONNX Runtime (macOS Intel)
+        if: matrix.onnx
+        run: brew install onnxruntime
+      - name: Configure ONNX Runtime (macOS Intel)
+        if: matrix.onnx
+        shell: bash
+        run: |
+          ort_prefix="$(brew --prefix onnxruntime)"
+          echo "ORT_LIB_PATH=$ort_prefix/lib" >> "$GITHUB_ENV"
+          echo "ORT_DYLIB_PATH=$ort_prefix/lib/libonnxruntime.dylib" >> "$GITHUB_ENV"
+          echo "DYLD_LIBRARY_PATH=$ort_prefix/lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}" >> "$GITHUB_ENV"
+      - name: Check
+        run: cargo check --locked --all-targets --features "${{ matrix.features }}"
+      - name: Clippy
+        run: cargo clippy --locked --all-targets --features "${{ matrix.features }}" -- -D warnings
+      - name: Test
+        run: cargo test --locked --all --features "${{ matrix.features }}"
 
   test-doc:
     name: Doc Tests
@@ -92,4 +137,4 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Test doc
-        run: cargo test --doc
+        run: cargo test --locked --doc

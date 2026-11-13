@@ -31,30 +31,6 @@ updates:
       - "dependencies"
       - "npm"
 
-  - package-ecosystem: "npm"
-    directory: "/vscode-extension"
-    schedule:
-      interval: "weekly"
-      day: "monday"
-      time: "06:00"
-    commit-message:
-      prefix: "deps(npm)"
-    labels:
-      - "dependencies"
-      - "npm"
-
-  - package-ecosystem: "npm"
-    directory: "/opencode-plugin"
-    schedule:
-      interval: "weekly"
-      day: "monday"
-      time: "06:00"
-    commit-message:
-      prefix: "deps(npm)"
-    labels:
-      - "dependencies"
-      - "npm"
-
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
