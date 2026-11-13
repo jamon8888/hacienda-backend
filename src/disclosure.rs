@@ -9,7 +9,7 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use rand::RngCore;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, sync::Arc, time::Duration};
 use tokio::sync::Mutex;
 use uuid::Uuid;
@@ -24,7 +24,7 @@ pub struct RequesterRef {
     pub tenant_id: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DisclosureScope {
     Entity { token: String },
     Document { doc_id: String },
@@ -52,13 +52,13 @@ impl DisclosureScope {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VaultBinding {
     pub engine_era_fingerprint: String,
     pub document_fingerprint: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DisclosureStatus {
     Pending,
@@ -76,14 +76,14 @@ impl DisclosureStatus {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RequestResult {
     pub handle: String,
     pub status: DisclosureStatus,
     pub expires_at: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StatusView {
     pub handle: String,
     pub status: DisclosureStatus,

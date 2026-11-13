@@ -247,14 +247,13 @@ impl AuditLog {
         if let Ok(mut readdir) = tokio::fs::read_dir(&config.log_dir).await {
             while let Some(entry) = readdir.next_entry().await.ok().flatten() {
                 let path = entry.path();
-                if path.extension().and_then(|s| s.to_str()) == Some("log") {
-                    if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                        if let Ok(epoch_num) = stem.parse::<u64>() {
-                            let metadata = entry.metadata().await?;
-                            entries.push((epoch_num, path));
-                            _ = metadata;
-                        }
-                    }
+                if path.extension().and_then(|s| s.to_str()) == Some("log")
+                    && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
+                    && let Ok(epoch_num) = stem.parse::<u64>()
+                {
+                    let metadata = entry.metadata().await?;
+                    entries.push((epoch_num, path));
+                    _ = metadata;
                 }
             }
         }
@@ -352,12 +351,11 @@ impl AuditLog {
         if let Ok(mut readdir) = tokio::fs::read_dir(&self.config.log_dir).await {
             while let Some(entry) = readdir.next_entry().await.ok().flatten() {
                 let path = entry.path();
-                if path.extension().and_then(|s| s.to_str()) == Some("log") {
-                    if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                        if let Ok(epoch_num) = stem.parse::<u64>() {
-                            entries.push((epoch_num, path));
-                        }
-                    }
+                if path.extension().and_then(|s| s.to_str()) == Some("log")
+                    && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
+                    && let Ok(epoch_num) = stem.parse::<u64>()
+                {
+                    entries.push((epoch_num, path));
                 }
             }
         }
@@ -383,7 +381,7 @@ impl AuditLog {
         let file = std::fs::File::open(&path)?;
         let reader = BufReader::new(file);
         let mut last_hash = GENESIS_HASH.to_string();
-        for line in reader.lines().flatten() {
+        for line in reader.lines().map_while(std::result::Result::ok) {
             if line.trim().is_empty() {
                 continue;
             }
@@ -476,12 +474,11 @@ impl AuditLog {
         if let Ok(mut readdir) = tokio::fs::read_dir(&self.config.log_dir).await {
             while let Some(entry) = readdir.next_entry().await.ok().flatten() {
                 let path = entry.path();
-                if path.extension().and_then(|s| s.to_str()) == Some("log") {
-                    if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                        if let Ok(epoch_num) = stem.parse::<u64>() {
-                            entries.push((epoch_num, path));
-                        }
-                    }
+                if path.extension().and_then(|s| s.to_str()) == Some("log")
+                    && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
+                    && let Ok(epoch_num) = stem.parse::<u64>()
+                {
+                    entries.push((epoch_num, path));
                 }
             }
         }

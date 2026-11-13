@@ -125,17 +125,28 @@ fn select_vault_key_provider(mode: &str) -> Result<Box<dyn VaultKeyProvider>> {
     match mode {
         "production" => {
             #[cfg(target_os = "macos")]
-            let provider: Box<dyn VaultKeyProvider> = Box::new(KeychainVaultKeyProvider);
+            {
+                let provider: Box<dyn VaultKeyProvider> = Box::new(KeychainVaultKeyProvider);
+                provider
+                    .key()
+                    .context("production vault custody unavailable")?;
+                Ok(provider)
+            }
             #[cfg(target_os = "windows")]
-            let provider: Box<dyn VaultKeyProvider> = Box::new(WindowsCredentialVaultKeyProvider);
+            {
+                let provider: Box<dyn VaultKeyProvider> =
+                    Box::new(WindowsCredentialVaultKeyProvider);
+                provider
+                    .key()
+                    .context("production vault custody unavailable")?;
+                Ok(provider)
+            }
             #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-            return Err(anyhow::anyhow!(
-                "production vault custody unavailable on this platform"
-            ));
-            provider
-                .key()
-                .context("production vault custody unavailable")?;
-            Ok(provider)
+            {
+                Err(anyhow::anyhow!(
+                    "production vault custody unavailable on this platform"
+                ))
+            }
         }
         "development" | "test" => {
             let raw = std::env::var("HACIENDA_VAULT_FIXTURE_KEY").context(

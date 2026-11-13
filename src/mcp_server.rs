@@ -22,7 +22,7 @@ use rmcp::{
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::io;
 use tokio::sync::RwLock;
@@ -1576,12 +1576,12 @@ mod authz_manifest_tests {
                 .get("b")
                 .unwrap()
                 .iter()
-                .any(|r| r.path == PathBuf::from("/a"))
+                .any(|r| r.path == Path::new("/a"))
         );
         assert!(
             !processed
                 .get("b")
-                .map(|m| m.contains_key(PathBuf::from("/a/doc").as_path()))
+                .map(|m| m.contains_key(Path::new("/a/doc")))
                 .unwrap_or(false)
         );
     }

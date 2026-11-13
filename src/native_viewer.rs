@@ -16,6 +16,7 @@ use crate::disclosure::{
     ViewerContent, ViewerError, ViewerSessionMeta,
 };
 
+#[cfg(target_os = "macos")]
 const SERVICE: &str = "com.hacienda.owner-presence.v1";
 
 #[derive(Debug, thiserror::Error)]

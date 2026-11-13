@@ -379,11 +379,15 @@ impl LocalSidecarClient {
         let mut read = self.read.lock().await;
         let mut write = self.write.lock().await;
         write_json(&mut *write, request).await?;
-        let line = read
-            .next_line()
+        let mut line = String::new();
+        if read
+            .read_line(&mut line)
             .await
             .map_err(|_| SidecarError::Io)?
-            .ok_or(SidecarError::Protocol)?;
+            == 0
+        {
+            return Err(SidecarError::Protocol);
+        }
         serde_json::from_str(&line).map_err(|_| SidecarError::Protocol)
     }
 }
@@ -407,11 +411,15 @@ where
         nonce: nonce.iter().map(|b| format!("{b:02x}")).collect(),
     };
     write_json(write, &hello).await?;
-    let line = read
-        .next_line()
+    let mut line = String::new();
+    if read
+        .read_line(&mut line)
         .await
         .map_err(|_| SidecarError::Io)?
-        .ok_or(SidecarError::Protocol)?;
+        == 0
+    {
+        return Err(SidecarError::Protocol);
+    }
     let challenge: ServerChallenge =
         serde_json::from_str(&line).map_err(|_| SidecarError::Protocol)?;
     let proof = HmacClientAuthenticator::new([credential.clone()], None)
