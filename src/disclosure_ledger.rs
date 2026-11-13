@@ -192,7 +192,7 @@ impl EvidenceLedger {
     pub fn append(&self, entry: DisclosureAuditEntry) -> Result<()> {
         validate_entry(&entry)?;
         let payload = serde_json::to_vec(&entry)?;
-        let mut db = self
+        let db = self
             .db
             .lock()
             .map_err(|_| anyhow::anyhow!("evidence ledger lock poisoned"))?;
@@ -226,7 +226,10 @@ impl EvidenceLedger {
         let mut previous = "0".repeat(64);
         let mut count = 0;
         while let Some(row) = rows.next()? {
-            let seq: u64 = row.get(0)?;
+            let seq_i64: i64 = row.get(0)?;
+            let seq: u64 = seq_i64
+                .try_into()
+                .context("evidence sequence is outside the u64 range")?;
             let payload: Vec<u8> = row.get::<_, String>(1)?.into_bytes();
             let prev: String = row.get(2)?;
             let hash: String = row.get(3)?;
