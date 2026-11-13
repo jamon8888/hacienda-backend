@@ -23,12 +23,12 @@ pub struct Principal {
 pub enum Capability {
     /// Can call search tool (returns tokenized snippets only).
     Search,
-    /// Can call rehydrate tool (owner-only, per-export review).
-    Rehydrate,
     /// Can call sync tool (trigger incremental/full rebuild).
     Sync,
     /// Can call status tool (index stats, fingerprint, etc.).
     Status,
+    /// Can call graph tools: read-only Cypher over the entity graph and GraphRAG retrieval.
+    GraphRag,
 }
 
 /// Resolves an MCP connection to a Principal.
@@ -44,11 +44,6 @@ pub trait PrincipalResolver: Send + Sync + 'static {
         &self,
         ctx: ResolutionContext,
     ) -> impl Future<Output = Result<Principal, ResolverError>> + Send;
-
-    /// Optional: provide a default principal for stdio transport.
-    fn default_principal(&self) -> Option<Principal> {
-        None
-    }
 }
 
 /// Context provided to the resolver during resolution.

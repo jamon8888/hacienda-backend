@@ -1,7 +1,9 @@
+pub mod audit;
 pub mod cli;
 pub mod cli_error;
 pub mod config;
 pub mod dual_store;
+pub mod encryption;
 pub mod folder_sync;
 pub mod gaze_engine;
 pub mod index_projection;
@@ -10,6 +12,7 @@ pub mod mcp_server;
 pub mod mcp_types;
 pub mod redactor;
 pub mod rehydration;
+pub mod search;
 
 pub use cli::{Cli, Commands, DoctorArgs, ExportRecoveryArgs, McpArgs, RehydrateArgs, SyncArgs};
 pub use cli_error::CliError;
@@ -27,6 +30,9 @@ pub use redactor::{BRIDGE_CATEGORY, BridgeError, GazeRedactor, class_label};
 pub use rehydration::{
     RehydrationAuditRecord, RehydrationError, get_vault_passphrase, log_audit, run_export_recovery,
     run_rehydrate,
+};
+pub use search::{
+    SearchEngine, SearchFilter, SearchParams, SearchResult, TenantSearchEngineManager,
 };
 
 /// Crate version, for diagnostics.

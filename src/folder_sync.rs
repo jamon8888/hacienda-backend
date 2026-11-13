@@ -15,7 +15,6 @@ use notify::{Config, Event, EventKind, RecommendedWatcher, Watcher};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
 use tokio::task::JoinHandle;
 use xberg::RedactionConfig;
 
@@ -319,11 +318,24 @@ impl FolderSync {
         let _ = self.event_tx.try_send(SyncEvent::FullRebuild { reason });
     }
 
-    /// Manual refresh: process all files once (for CLI command).
+    /// Manual refresh: process all files once, clearing the index first (full rebuild).
     pub async fn manual_refresh(&self) {
-        self.trigger_full_rebuild("manual refresh".to_owned());
-        // Wait for processing (in real impl, would await a completion signal)
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        // A one-shot refresh has no running sync loop to consume an event.
+        // Execute the rebuild directly so the command does not report success
+        // before any files have been processed.
+        Self::full_rebuild(&self.root, &self.config, &self.indexed).await;
+    }
+
+    /// One-shot incremental refresh: index new/changed files without clearing.
+    pub async fn manual_refresh_incremental(&self) {
+        if let Ok(mut entries) = tokio::fs::read_dir(&self.root).await {
+            while let Ok(Some(entry)) = entries.next_entry().await {
+                let path = entry.path();
+                if path.is_file() {
+                    Self::handle_file_changed(&self.root, &self.config, &self.indexed, path).await;
+                }
+            }
+        }
     }
 
     /// Get current indexed documents (for status/debug).
@@ -333,23 +345,34 @@ impl FolderSync {
 }
 
 /// CLI command for manual refresh.
-pub async fn run_manual_refresh(config_path: &std::path::Path) -> Result<(), crate::CliError> {
+///
+/// `full` selects a complete rebuild; otherwise only new/changed files are
+/// (re)indexed. Status goes to stderr and the indexed documents are returned:
+/// stdout may carry the stdio MCP JSON-RPC stream when called from the server.
+pub async fn run_manual_refresh(
+    config_path: &std::path::Path,
+    full: bool,
+) -> Result<Vec<IndexedDocument>, crate::CliError> {
     let config = crate::load_config(config_path)?;
     let sync = FolderSync::new(std::env::current_dir()?, config);
 
     // Trigger manual refresh (one-shot, no watcher needed)
-    sync.manual_refresh().await;
+    if full {
+        sync.manual_refresh().await;
+    } else {
+        sync.manual_refresh_incremental().await;
+    }
 
-    // Print status
+    // Report status on stderr, never stdout (stdio transport safety)
     let indexed = sync.get_indexed().await;
-    println!(
+    eprintln!(
         "{} Indexed {} documents:",
         console::style("✓").green(),
         indexed.len()
     );
-    for doc in indexed {
-        println!("  {} ({})", doc.doc_id, doc.fingerprint.as_str());
+    for doc in &indexed {
+        eprintln!("  {} ({})", doc.doc_id, doc.fingerprint.as_str());
     }
 
-    Ok(())
+    Ok(indexed)
 }

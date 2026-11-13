@@ -1,6 +1,6 @@
 //! CLI for hacienda-backend: rehydration, audit, and doctor commands.
 
-use clap::{Args, Parser, Subcommand};
+use clap::{ArgGroup, Args, Parser, Subcommand};
 use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
@@ -34,6 +34,7 @@ pub enum Commands {
 
 /// Arguments for the rehydrate command.
 #[derive(Args, Debug)]
+#[command(group(ArgGroup::new("target").required(true).args(["doc_id", "entity"])))]
 pub struct RehydrateArgs {
     /// Document ID to rehydrate (required for full document rehydration).
     #[arg(long, short = 'd', conflicts_with = "entity")]
@@ -47,17 +48,21 @@ pub struct RehydrateArgs {
     #[arg(long, short = 'v', required = true)]
     pub vault_map: PathBuf,
 
-    /// Path to the gaze manifest file (optional, for audit context).
-    #[arg(long, short = 'm')]
-    pub manifest: Option<PathBuf>,
+    /// Path to the gaze manifest file used for independent binding checks.
+    #[arg(long, short = 'm', required = true)]
+    pub manifest: PathBuf,
 
-    /// Output path for rehydrated content (stdout if omitted).
-    #[arg(long, short = 'o')]
-    pub output: Option<PathBuf>,
+    /// Output path for rehydrated content.
+    #[arg(long, short = 'o', required = true)]
+    pub output: PathBuf,
 
-    /// Skip interactive confirmation (for scripting).
+    /// Request confirmation bypass; accepted only from an interactive terminal.
     #[arg(long, short = 'y')]
     pub yes: bool,
+
+    /// Path to the original document used to verify the vault binding.
+    #[arg(long)]
+    pub document: Option<PathBuf>,
 }
 
 /// Arguments for the doctor command.
@@ -86,10 +91,6 @@ pub struct ExportRecoveryArgs {
     /// Path to the gaze manifest file.
     #[arg(long, short = 'm', required = true)]
     pub manifest: PathBuf,
-
-    /// Recovery passphrase (generated if omitted).
-    #[arg(long, short = 'p')]
-    pub passphrase: Option<String>,
 }
 
 /// Arguments for the sync command.
@@ -118,4 +119,8 @@ pub struct McpArgs {
     /// HTTP bind address (when transport=http).
     #[arg(long, default_value = "127.0.0.1:8080")]
     pub http_addr: String,
+
+    /// Path to hacienda.toml (for sync tool).
+    #[arg(long)]
+    pub config: Option<PathBuf>,
 }

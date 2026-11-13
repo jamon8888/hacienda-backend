@@ -1,11 +1,13 @@
 //! Rehydration logic: decrypt vault map, restore entities/documents, audit logging.
 
 use crate::cli::{ExportRecoveryArgs, RehydrateArgs};
+use crate::dual_store::RehydrationManifest;
+use crate::encryption::{decrypt_vault_blob, default_vault_key_provider, encrypt_vault_blob};
 use console::style;
 use dialoguer::Confirm;
 use std::fs;
 use std::path::Path;
-use xberg::text::redaction::rehydration::{RehydrationMap, decrypt_map, encrypt_map};
+use xberg::text::redaction::rehydration::RehydrationMap;
 
 /// Errors from rehydration operations.
 #[derive(Debug, thiserror::Error)]
@@ -20,12 +22,18 @@ pub enum RehydrationError {
     Decryption(String),
     #[error("fingerprint mismatch: expected {expected}, got {actual}")]
     FingerprintMismatch { expected: String, actual: String },
+    #[error("document binding mismatch: expected {expected}, got {actual}")]
+    DocumentBindingMismatch { expected: String, actual: String },
     #[error("entity not found in vault: {0}")]
     EntityNotFound(String),
     #[error("manifest parse error: {0}")]
     ManifestParse(String),
     #[error("user cancelled")]
     UserCancelled,
+    #[error("vault custody failed: {0}")]
+    Custody(String),
+    #[error("unsafe output path: {0}")]
+    UnsafeOutput(String),
 }
 
 /// Result of a rehydration operation (for audit logging).
@@ -39,13 +47,60 @@ pub struct RehydrationAuditRecord {
     pub error: Option<String>,
 }
 
-/// Load vault map from XPII\x01 encrypted file.
-fn load_vault_map<P: AsRef<Path>>(
+/// Load a vault map only after checking its envelope against the requested
+/// manifest (and, when supplied, the original document) independently.
+pub fn load_vault_map_verified<P: AsRef<Path>, M: AsRef<Path>>(
     path: P,
+    manifest_path: M,
+    document_path: Option<&Path>,
     passphrase: &str,
 ) -> Result<RehydrationMap, RehydrationError> {
+    let _ = passphrase;
+    let manifest: RehydrationManifest = serde_json::from_slice(&load_manifest(manifest_path)?)
+        .map_err(|e| RehydrationError::ManifestParse(e.to_string()))?;
+    let expected_binding = if let Some(document_path) = document_path {
+        blake3::hash(&fs::read(document_path)?).to_hex().to_string()
+    } else {
+        manifest.document_binding.clone()
+    };
     let blob = fs::read(path)?;
-    decrypt_map(&blob, passphrase).map_err(|e| RehydrationError::Decryption(e.to_string()))
+    let envelope: crate::encryption::VaultBlob =
+        serde_json::from_slice(&blob).map_err(|e| RehydrationError::Decryption(e.to_string()))?;
+    if envelope.fingerprint != manifest.fingerprint.as_str() {
+        return Err(RehydrationError::FingerprintMismatch {
+            expected: manifest.fingerprint.as_str().to_owned(),
+            actual: envelope.fingerprint,
+        });
+    }
+    if envelope.document_binding != expected_binding {
+        return Err(RehydrationError::DocumentBindingMismatch {
+            expected: expected_binding,
+            actual: envelope.document_binding,
+        });
+    }
+    // The expected values above come from the requested artifact/document, not
+    // from the envelope, and are checked before custody/decryption.
+    let provider =
+        default_vault_key_provider().map_err(|e| RehydrationError::Decryption(e.to_string()))?;
+    let plaintext = decrypt_vault_blob(
+        &blob,
+        &manifest.fingerprint.0,
+        &expected_binding,
+        provider.as_ref(),
+    )
+    .map_err(|e| RehydrationError::Decryption(e.to_string()))?;
+    serde_json::from_slice(&plaintext).map_err(|e| RehydrationError::Decryption(e.to_string()))
+}
+
+/// Legacy API retained for callers that do not have the requested manifest.
+/// Refuse rather than performing a self-consistency-only verification.
+pub fn load_vault_map<P: AsRef<Path>>(
+    _path: P,
+    _passphrase: &str,
+) -> Result<RehydrationMap, RehydrationError> {
+    Err(RehydrationError::ManifestParse(
+        "manifest is required for independent vault binding verification".to_owned(),
+    ))
 }
 
 /// Load gaze manifest from file.
@@ -112,6 +167,23 @@ fn write_output(content: &str, output_path: Option<&Path>) -> Result<(), Rehydra
     }
 }
 
+fn validate_output_path(path: &Path) -> Result<(), RehydrationError> {
+    let path_text = path.to_string_lossy();
+    if path_text == "-" || path_text == "/dev/stdout" || path_text == "/proc/self/fd/1" {
+        return Err(RehydrationError::UnsafeOutput(
+            "stdout and special device aliases are not permitted".to_owned(),
+        ));
+    }
+    if let Ok(metadata) = fs::symlink_metadata(path) {
+        if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
+            return Err(RehydrationError::UnsafeOutput(
+                "output must be a regular, non-symlink file".to_owned(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Main rehydration entry point.
 pub async fn run_rehydrate(
     args: RehydrateArgs,
@@ -119,40 +191,50 @@ pub async fn run_rehydrate(
 ) -> Result<RehydrationAuditRecord, RehydrationError> {
     let timestamp = chrono::Utc::now().to_rfc3339();
 
-    // Load vault map
-    let vault_map = load_vault_map(&args.vault_map, vault_passphrase)?;
+    validate_output_path(&args.output)?;
+    if args.yes && !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+        return Err(RehydrationError::UserCancelled);
+    }
+    let manifest: RehydrationManifest = serde_json::from_slice(&load_manifest(&args.manifest)?)
+        .map_err(|e| RehydrationError::ManifestParse(e.to_string()))?;
+    if args.document.is_none() {
+        return Err(RehydrationError::ManifestParse(
+            "original document is required for independent vault binding verification".to_owned(),
+        ));
+    }
 
-    // Load manifest if provided
-    let _manifest_bytes = if let Some(manifest_path) = &args.manifest {
-        Some(load_manifest(manifest_path)?)
-    } else {
-        None
-    };
-
-    if let Some(entity_token) = args.entity {
+    if let Some(entity_token) = args.entity.as_deref() {
         // Single entity rehydration
         if !args.yes {
-            let confirmed = confirm_rehydration(&entity_token, false)?;
+            let confirmed = confirm_rehydration(entity_token, false)?;
             if !confirmed {
                 return Err(RehydrationError::UserCancelled);
             }
         }
 
-        let original = rehydrate_entity(&vault_map, &entity_token)?;
-        write_output(&original, args.output.as_deref())?;
+        // Confirmation and independent path validation happen before custody
+        // access or decryption.
+        let vault_map = load_vault_map_verified(
+            &args.vault_map,
+            &args.manifest,
+            args.document.as_deref(),
+            vault_passphrase,
+        )?;
+        let original = rehydrate_entity(&vault_map, entity_token)?;
+        write_output(&original, Some(&args.output))?;
 
         Ok(RehydrationAuditRecord {
             timestamp,
             operation: "entity".to_owned(),
-            scope: entity_token,
-            fingerprint: String::new(), // TODO: extract from manifest
+            scope: entity_token.to_owned(),
+            fingerprint: manifest.fingerprint.as_str().to_owned(),
             success: true,
             error: None,
         })
-    } else if let Some(doc_id) = args.doc_id {
+    } else if let Some(doc_id) = args.doc_id.as_deref() {
         // Full document rehydration
         if !args.yes {
-            let confirmed = confirm_rehydration(&doc_id, true)?;
+            let confirmed = confirm_rehydration(doc_id, true)?;
             if !confirmed {
                 return Err(RehydrationError::UserCancelled);
             }
@@ -174,73 +256,53 @@ pub async fn run_export_recovery(
     args: ExportRecoveryArgs,
     vault_passphrase: &str,
 ) -> Result<(), RehydrationError> {
-    let vault_map = load_vault_map(&args.vault_map, vault_passphrase)?;
-    let manifest_bytes = load_manifest(&args.manifest)?;
-
-    // Generate or use provided recovery passphrase
-    let recovery_passphrase = args.passphrase.unwrap_or_else(|| {
-        // Generate a secure random passphrase
-        use rand::Rng;
-        const CHARSET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-        let mut rng = rand::rng();
-        (0..32)
-            .map(|_| CHARSET[rng.random_range(0..CHARSET.len())] as char)
-            .collect()
-    });
-
-    // Create recovery bundle: JSON with both encrypted blobs
-    #[derive(serde::Serialize)]
-    struct RecoveryBundle {
-        vault_map: Vec<u8>,
-        manifest: Vec<u8>,
-        fingerprint: String,
-        created_at: String,
+    if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+        return Err(RehydrationError::UserCancelled);
     }
-
-    let encrypted_vault = encrypt_map(&vault_map, &recovery_passphrase)?;
-    let bundle = RecoveryBundle {
-        vault_map: encrypted_vault,
-        manifest: manifest_bytes,
-        fingerprint: String::new(), // TODO: extract from manifest
-        created_at: chrono::Utc::now().to_rfc3339(),
-    };
-
-    let bundle_json = serde_json::to_vec(&bundle).map_err(RehydrationError::Json)?;
-
-    // Encrypt the entire bundle with the recovery passphrase
-    // For simplicity, we'll just write the JSON (it contains encrypted blobs)
-    fs::write(&args.output, &bundle_json).map_err(RehydrationError::Io)?;
-
-    eprintln!(
-        "{} Recovery bundle written to {}",
-        style("✓").green().bold(),
-        style(args.output.display()).cyan()
-    );
-    eprintln!(
-        "{} Recovery passphrase: {}",
-        style("🔑").yellow(),
-        style(&recovery_passphrase).bold()
-    );
-    eprintln!(
-        "{} Store this passphrase securely. It cannot be recovered.",
-        style("⚠").yellow()
-    );
+    if !confirm_rehydration("recovery export", false)? {
+        return Err(RehydrationError::UserCancelled);
+    }
+    validate_output_path(&args.output)?;
+    let manifest_bytes = load_manifest(&args.manifest)?;
+    let vault_map =
+        load_vault_map_verified(&args.vault_map, &args.manifest, None, vault_passphrase)?;
+    let provider =
+        default_vault_key_provider().map_err(|e| RehydrationError::Decryption(e.to_string()))?;
+    let plaintext = serde_json::json!({
+        "vault_map": vault_map,
+        "manifest": manifest_bytes,
+        "created_at": chrono::Utc::now().to_rfc3339(),
+    });
+    let bundle = encrypt_vault_blob(
+        &serde_json::to_vec(&plaintext)?,
+        "recovery",
+        "owner-confirmed",
+        provider.as_ref(),
+    )
+    .map_err(|e| RehydrationError::Custody(e.to_string()))?;
+    fs::write(&args.output, bundle).map_err(RehydrationError::Io)?;
+    eprintln!("Recovery bundle written; vault contents and key material are not displayed.");
 
     Ok(())
 }
 
 /// Retrieve vault passphrase from macOS Keychain (stub for now).
 pub fn get_vault_passphrase() -> Result<String, RehydrationError> {
-    // TODO: Implement actual Keychain retrieval
-    // For now, use the test passphrase
-    Ok("hacienda-backend-vault-key-v1".to_owned())
+    // Custody is intentionally resolved only after an interactive operation
+    // has been confirmed and its independent bindings have been checked.
+    Ok(String::new())
 }
 
 /// Log rehydration audit record.
 pub fn log_audit(record: &RehydrationAuditRecord) -> Result<(), RehydrationError> {
-    // TODO: Integrate with gaze-audit SQLite logger
-    // For now, log to stderr as structured JSON
-    let json = serde_json::to_string(record).map_err(RehydrationError::Json)?;
+    // Metadata-only audit: never emit tokens, document IDs, values, arguments, or errors.
+    let json = serde_json::json!({
+        "timestamp": record.timestamp,
+        "operation": record.operation,
+        "scope_present": !record.scope.is_empty(),
+        "fingerprint": record.fingerprint,
+        "success": record.success,
+    });
     eprintln!("{} {}", style("[AUDIT]").blue().bold(), json);
     Ok(())
 }
