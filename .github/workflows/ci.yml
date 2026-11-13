@@ -51,6 +51,12 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
+      - name: Install protoc for Basemind
+        if: matrix.features == 'basemind'
+        uses: arduino/setup-protoc@v3
+        with:
+          version: "25.3"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
       - name: Install ONNX Runtime (macOS Intel)
         if: matrix.onnx
         run: brew install onnxruntime

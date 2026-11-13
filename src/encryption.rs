@@ -1,7 +1,9 @@
 //! Encryption at rest for LanceDB, Tantivy, and Vault.
 //! Supports AES-256-GCM and ChaCha20-Poly1305 with KMS/HSM integration.
 
-use anyhow::{Context, Result, bail};
+#[cfg(target_os = "windows")]
+use anyhow::bail;
+use anyhow::{Context, Result};
 
 use rand::RngCore;
 use serde::{Deserialize, Serialize};

@@ -7,7 +7,9 @@
 //! temporary files, logs, HTTP, or MCP.
 
 use async_trait::async_trait;
-use std::{collections::HashMap, path::PathBuf, process::Stdio, sync::Arc};
+#[cfg(target_os = "windows")]
+use std::collections::HashMap;
+use std::{path::PathBuf, process::Stdio, sync::Arc};
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 

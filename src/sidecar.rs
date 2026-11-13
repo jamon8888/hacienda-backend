@@ -341,7 +341,8 @@ impl LocalSidecarClient {
         credential: ClientCredential,
     ) -> Result<Self, SidecarError> {
         #[cfg(unix)]
-        if let SidecarEndpoint::Unix(path) = endpoint {
+        {
+            let SidecarEndpoint::Unix(path) = endpoint;
             let stream = tokio::net::UnixStream::connect(path)
                 .await
                 .map_err(|_| SidecarError::Unavailable)?;
@@ -356,7 +357,8 @@ impl LocalSidecarClient {
             });
         }
         #[cfg(windows)]
-        if let SidecarEndpoint::WindowsNamedPipe(name) = endpoint {
+        {
+            let SidecarEndpoint::WindowsNamedPipe(name) = endpoint;
             use tokio::net::windows::named_pipe::ClientOptions;
             let stream = ClientOptions::new()
                 .open(name)

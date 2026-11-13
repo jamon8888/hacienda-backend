@@ -22,7 +22,7 @@ use rmcp::{
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::io;
 use tokio::sync::RwLock;
@@ -1496,6 +1496,7 @@ async fn healthz() -> Json<Value> {
 mod authz_manifest_tests {
     use super::*;
     use std::collections::HashSet;
+    use std::path::Path;
 
     #[test]
     fn closed_manifest_contains_only_current_tools() {

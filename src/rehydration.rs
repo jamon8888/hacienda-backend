@@ -194,35 +194,44 @@ fn confirm_rehydration(scope: &str, is_full_doc: bool) -> Result<bool, Rehydrati
     Ok(confirmation)
 }
 
-/// Write rehydrated content to file or stdout.
-fn write_output(content: &str, output_path: Option<&Path>) -> Result<(), RehydrationError> {
-    match output_path {
-        Some(path) => fs::write(path, content).map_err(RehydrationError::Io),
-        None => {
-            println!("{}", content);
-            Ok(())
-        }
-    }
+/// Write rehydrated content to the explicitly owner-selected file.
+fn write_output(content: &str, output_path: &Path) -> Result<(), RehydrationError> {
+    fs::write(output_path, content).map_err(RehydrationError::Io)
 }
 
 /// Main rehydration entry point.
-pub(crate) async fn run_rehydrate(
+pub async fn run_rehydrate<F>(
     args: RehydrateArgs,
-    provider: &dyn VaultKeyProvider,
+    provider_factory: F,
     binding: &PrincipalBinding,
     tenant_id: &str,
-) -> Result<RehydrationAuditRecord, RehydrationError> {
+) -> Result<RehydrationAuditRecord, RehydrationError>
+where
+    F: FnOnce() -> Result<Box<dyn VaultKeyProvider>, RehydrationError>,
+{
     if !binding.authorizes(tenant_id) {
         return Err(RehydrationError::UnauthorizedTenant);
     }
     let timestamp = chrono::Utc::now().to_rfc3339();
 
-    if args.output.is_none() {
-        return Err(RehydrationError::UserCancelled);
-    }
     if args.yes && !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
         return Err(RehydrationError::UserCancelled);
     }
+    let (scope, is_full_doc) = match (&args.entity, &args.doc_id) {
+        (Some(entity), None) => (entity.as_str(), false),
+        (None, Some(doc_id)) => (doc_id.as_str(), true),
+        _ => {
+            return Err(RehydrationError::ManifestParse(
+                "exactly one of entity or doc_id is required".to_owned(),
+            ));
+        }
+    };
+    if !args.yes && !confirm_rehydration(scope, is_full_doc)? {
+        return Err(RehydrationError::UserCancelled);
+    }
+    // Consent is collected before invoking the custody factory.  A provider
+    // may touch Keychain/Credential Manager while it is constructed.
+    let provider = provider_factory()?;
     let manifest_path = args.manifest.as_ref().ok_or_else(|| {
         RehydrationError::ManifestParse(
             "manifest is required for independent vault binding verification".to_owned(),
@@ -233,20 +242,12 @@ pub(crate) async fn run_rehydrate(
         &args.vault_map,
         manifest_path,
         args.document.as_deref(),
-        provider,
+        provider.as_ref(),
     )?;
 
     if let Some(entity_token) = args.entity {
-        // Single entity rehydration
-        if !args.yes {
-            let confirmed = confirm_rehydration(&entity_token, false)?;
-            if !confirmed {
-                return Err(RehydrationError::UserCancelled);
-            }
-        }
-
         let original = rehydrate_entity(&vault_map, &entity_token)?;
-        write_output(&original, args.output.as_deref())?;
+        write_output(&original, &args.output)?;
 
         Ok(RehydrationAuditRecord {
             timestamp,
@@ -256,15 +257,7 @@ pub(crate) async fn run_rehydrate(
             success: true,
             error: None,
         })
-    } else if let Some(doc_id) = args.doc_id {
-        // Full document rehydration
-        if !args.yes {
-            let confirmed = confirm_rehydration(&doc_id, true)?;
-            if !confirmed {
-                return Err(RehydrationError::UserCancelled);
-            }
-        }
-
+    } else if let Some(_doc_id) = args.doc_id {
         // For full document rehydration, we need the redacted content.
         // This would come from the document store (not implemented yet).
         // For now, return an error indicating this needs the document content.
@@ -272,14 +265,14 @@ pub(crate) async fn run_rehydrate(
             "Full document rehydration requires the redacted document content. Not yet implemented.".to_owned(),
         ))
     } else {
-        unreachable!("clap ensures either entity or doc_id is provided");
+        unreachable!("validated entity/doc_id selection");
     }
 }
 
 /// Export recovery bundle: encrypts vault map + manifest with owner custody.
 pub async fn run_export_recovery(
     args: ExportRecoveryArgs,
-    provider: &dyn VaultKeyProvider,
+    provider_factory: impl FnOnce() -> Result<Box<dyn VaultKeyProvider>, RehydrationError>,
     binding: &PrincipalBinding,
     tenant_id: &str,
 ) -> Result<(), RehydrationError> {
@@ -287,7 +280,6 @@ pub async fn run_export_recovery(
         return Err(RehydrationError::UnauthorizedTenant);
     }
     let manifest_bytes = load_manifest(&args.manifest)?;
-    let vault_map = load_vault_map_verified(&args.vault_map, &args.manifest, None, provider)?;
 
     if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
         return Err(RehydrationError::UserCancelled);
@@ -295,6 +287,11 @@ pub async fn run_export_recovery(
     if !confirm_rehydration("recovery export", false)? {
         return Err(RehydrationError::UserCancelled);
     }
+    // Consent is collected before invoking custody, matching the rehydration
+    // path's owner-review gate.
+    let provider = provider_factory()?;
+    let vault_map =
+        load_vault_map_verified(&args.vault_map, &args.manifest, None, provider.as_ref())?;
     let plaintext = serde_json::json!({
         "vault_map": vault_map,
         "manifest": manifest_bytes,
@@ -304,7 +301,7 @@ pub async fn run_export_recovery(
         &serde_json::to_vec(&plaintext)?,
         "recovery",
         "owner-confirmed",
-        provider,
+        provider.as_ref(),
     )
     .map_err(|e| RehydrationError::Custody(e.to_string()))?;
     fs::write(&args.output, bundle).map_err(RehydrationError::Io)?;

@@ -1,6 +1,7 @@
 //! Binary entry point for hacienda-backend CLI.
 //!
 //! Commands:
+//! - `rehydrate`: Restore an entity to an owner-selected file after review
 //! - `doctor`: Validate configuration and environment
 //! - `export-recovery`: Create encrypted recovery bundle for offline restore
 //! - `sync`: Sync document folder (watcher or manual refresh)
@@ -13,7 +14,7 @@ use hacienda_backend::{
     audit::{AuditConfig, AuditLog},
     cli::{Cli, Commands, McpArgs},
     cli_error::CliError,
-    doctor_checks, load_config, run_export_recovery,
+    doctor_checks, load_config, log_audit, run_export_recovery, run_rehydrate,
 };
 use std::process;
 use std::sync::Arc;
@@ -56,6 +57,22 @@ fn main() {
 fn run_command(cli: Cli) -> Result<(), CliError> {
     let rt = tokio::runtime::Runtime::new()?;
     match cli.command {
+        Commands::Rehydrate(args) => {
+            let config = load_config(&args.config)?;
+            let auth = cli_auth(&config, args.tenant.as_deref())?;
+            let encryption = config.encryption_config(Some(&auth.tenant_id)).clone();
+            let audit = rt.block_on(run_rehydrate(
+                args,
+                move || {
+                    hacienda_backend::encryption::vault_key_provider(&encryption).map_err(|e| {
+                        hacienda_backend::rehydration::RehydrationError::Custody(e.to_string())
+                    })
+                },
+                &auth.binding,
+                &auth.tenant_id,
+            ))?;
+            log_audit(&audit)?;
+        }
         Commands::Doctor(args) => {
             let config = load_config(&args.config)?;
             let _auth = cli_auth(&config, None)?;
@@ -89,13 +106,14 @@ fn run_command(cli: Cli) -> Result<(), CliError> {
         Commands::ExportRecovery(args) => {
             let config = load_config(&args.config)?;
             let auth = cli_auth(&config, args.tenant.as_deref())?;
-            let provider = hacienda_backend::encryption::vault_key_provider(
-                config.encryption_config(Some(&auth.tenant_id)),
-            )
-            .map_err(|e| CliError::Other(e.to_string()))?;
+            let encryption = config.encryption_config(Some(&auth.tenant_id)).clone();
             rt.block_on(run_export_recovery(
                 args,
-                provider.as_ref(),
+                move || {
+                    hacienda_backend::encryption::vault_key_provider(&encryption).map_err(|e| {
+                        hacienda_backend::rehydration::RehydrationError::Custody(e.to_string())
+                    })
+                },
                 &auth.binding,
                 &auth.tenant_id,
             ))?;

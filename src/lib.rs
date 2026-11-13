@@ -22,7 +22,7 @@ pub mod sidecar;
 pub use authz::{
     AuthzError, CleanDocumentRef, FolderRoot, PrincipalBinding, PrincipalRole, attach_local_doc,
 };
-pub use cli::{Cli, Commands, DoctorArgs, ExportRecoveryArgs, McpArgs, SyncArgs};
+pub use cli::{Cli, Commands, DoctorArgs, ExportRecoveryArgs, McpArgs, RehydrateArgs, SyncArgs};
 pub use cli_error::CliError;
 pub use config::{ConfigError, HaciendaConfig, RedactionConfig, doctor_checks, load_config};
 pub use disclosure::{
@@ -49,7 +49,9 @@ pub use mcp_server::{McpServer, ToolRegistry};
 pub use mcp_types::{Capability, Principal, PrincipalResolver, ResolutionContext, ResolverError};
 pub use native_viewer::{NativeViewerSink, PlatformOwnerPresence};
 pub use redactor::{BRIDGE_CATEGORY, BridgeError, GazeRedactor, class_label};
-pub use rehydration::{RehydrationAuditRecord, RehydrationError, log_audit, run_export_recovery};
+pub use rehydration::{
+    RehydrationAuditRecord, RehydrationError, log_audit, run_export_recovery, run_rehydrate,
+};
 pub use search::{
     SearchEngine, SearchFilter, SearchParams, SearchResult, TenantSearchEngineManager,
 };

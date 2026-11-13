@@ -1,4 +1,4 @@
-//! CLI for hacienda-backend: audit, diagnostics, sync, and owner-viewer commands.
+//! CLI for hacienda-backend: owner-reviewed recovery, diagnostics, sync, and viewer commands.
 
 use clap::{Args, Parser, Subcommand};
 use std::path::PathBuf;
@@ -16,6 +16,9 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Commands {
+    /// Rehydrate one owner-reviewed entity to an explicit output file.
+    Rehydrate(RehydrateArgs),
+
     /// Run doctor checks on configuration and environment.
     Doctor(DoctorArgs),
 
@@ -32,13 +35,8 @@ pub enum Commands {
     NativeViewer,
 }
 
-/// Internal arguments used by the guarded library rehydration path.
-///
-/// This is deliberately not a `Commands` variant: raw restoration is only
-/// reachable from the owner-authenticated viewer flow, never from a CLI
-/// command or shell-visible output path.
 #[derive(Args, Debug)]
-pub(crate) struct RehydrateArgs {
+pub struct RehydrateArgs {
     /// Hacienda configuration containing the authenticated principal binding.
     #[arg(long, short = 'c', default_value = "basemind.toml")]
     pub config: PathBuf,
@@ -57,13 +55,13 @@ pub(crate) struct RehydrateArgs {
     #[arg(long, short = 'v', required = true)]
     pub vault_map: PathBuf,
 
-    /// Path to the gaze manifest file (optional, for audit context).
-    #[arg(long, short = 'm')]
+    /// Path to the gaze manifest file used for independent binding verification.
+    #[arg(long, short = 'm', required = true)]
     pub manifest: Option<PathBuf>,
 
-    /// Output path for rehydrated content (stdout if omitted).
-    #[arg(long, short = 'o')]
-    pub output: Option<PathBuf>,
+    /// Explicit output path for rehydrated content; stdout is never used.
+    #[arg(long, short = 'o', required = true)]
+    pub output: PathBuf,
 
     /// Request confirmation bypass; accepted only from an interactive terminal.
     #[arg(long, short = 'y')]
@@ -150,7 +148,34 @@ mod tests {
     use clap::Parser;
 
     #[test]
-    fn raw_rehydrate_command_is_not_exposed() {
-        assert!(Cli::try_parse_from(["hacienda-backend", "rehydrate"]).is_err());
+    fn rehydrate_command_requires_explicit_output() {
+        assert!(
+            Cli::try_parse_from([
+                "hacienda-backend",
+                "rehydrate",
+                "--entity",
+                "[EMAIL_1]",
+                "--vault-map",
+                "vault.json",
+                "--manifest",
+                "manifest.json",
+            ])
+            .is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "hacienda-backend",
+                "rehydrate",
+                "--entity",
+                "[EMAIL_1]",
+                "--vault-map",
+                "vault.json",
+                "--manifest",
+                "manifest.json",
+                "--output",
+                "restored.txt",
+            ])
+            .is_ok()
+        );
     }
 }
