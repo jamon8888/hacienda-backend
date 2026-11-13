@@ -20,6 +20,7 @@ pub trait VaultKeyProvider: Send + Sync {
 }
 
 /// Explicit development/test fixture. Production constructors reject this provider.
+#[derive(Zeroize, ZeroizeOnDrop)]
 pub struct FixtureVaultKeyProvider(pub [u8; 32]);
 impl VaultKeyProvider for FixtureVaultKeyProvider {
     fn key(&self) -> Result<[u8; 32]> {
@@ -34,8 +35,10 @@ impl VaultKeyProvider for KeychainVaultKeyProvider {
         #[cfg(target_os = "macos")]
         {
             use security_framework::passwords::get_generic_password;
-            let bytes = get_generic_password(VAULT_KEYCHAIN_SERVICE, VAULT_KEYCHAIN_ACCOUNT)
-                .context("vault Keychain item is unavailable")?;
+            let bytes = zeroize::Zeroizing::new(
+                get_generic_password(VAULT_KEYCHAIN_SERVICE, VAULT_KEYCHAIN_ACCOUNT)
+                    .context("vault Keychain item is unavailable")?,
+            );
             let key: [u8; 32] = bytes
                 .as_slice()
                 .try_into()
@@ -112,15 +115,16 @@ pub fn encrypt_vault_blob(
         Aes256Gcm, KeyInit, Nonce,
         aead::{Aead, Payload},
     };
-    let cipher = Aes256Gcm::new((&provider.key()?).into());
+    let key = zeroize::Zeroizing::new(provider.key()?);
+    let cipher = Aes256Gcm::new((&*key).into());
     let nonce_bytes: [u8; 12] = rand::random();
-    let aad = format!("hacienda-vault-v1\\0{fingerprint}\\0{document_binding}");
+    let aad = vault_aad(2, fingerprint, document_binding);
     let ciphertext = cipher
         .encrypt(
             Nonce::from_slice(&nonce_bytes),
             Payload {
                 msg: plaintext,
-                aad: aad.as_bytes(),
+                aad: &aad,
             },
         )
         .map_err(|_| anyhow::anyhow!("vault encryption failed"))?;
@@ -152,17 +156,33 @@ pub fn decrypt_vault_blob(
     {
         return Err(anyhow::anyhow!("vault binding mismatch"));
     }
-    let cipher = Aes256Gcm::new((&provider.key()?).into());
-    let aad = format!("hacienda-vault-v1\\0{expected_fingerprint}\\0{document_binding}");
-    cipher
-        .decrypt(
+    let key = zeroize::Zeroizing::new(provider.key()?);
+    let cipher = Aes256Gcm::new((&*key).into());
+    let decrypt = |aad: &[u8]| {
+        cipher.decrypt(
             Nonce::from_slice(&envelope.nonce),
             Payload {
                 msg: &envelope.ciphertext,
-                aad: aad.as_bytes(),
+                aad,
             },
         )
+    };
+    decrypt(&vault_aad(2, expected_fingerprint, document_binding))
+        .or_else(|_| decrypt(&vault_aad(1, expected_fingerprint, document_binding)))
         .map_err(|_| anyhow::anyhow!("vault authentication failed"))
+}
+
+fn vault_aad(version: u8, fingerprint: &str, document_binding: &str) -> Vec<u8> {
+    if version == 1 {
+        return format!("hacienda-vault-v1\\0{fingerprint}\\0{document_binding}").into_bytes();
+    }
+    let mut aad = Vec::new();
+    aad.extend_from_slice(b"hacienda-vault-v2");
+    for value in [fingerprint.as_bytes(), document_binding.as_bytes()] {
+        aad.extend_from_slice(&(value.len() as u64).to_be_bytes());
+        aad.extend_from_slice(value);
+    }
+    aad
 }
 
 /// Master key for encryption (wrapped by KMS or derived from passphrase).
@@ -746,16 +766,54 @@ impl LocalKmsClient {
 
 #[async_trait::async_trait]
 impl KmsClient for LocalKmsClient {
-    async fn wrap_key(&self, _key: &[u8; 32]) -> Result<WrappedKey> {
-        Err(anyhow::anyhow!(
-            "experimental local KMS is disabled: authenticated KMS required"
-        ))
+    async fn wrap_key(&self, key: &[u8; 32]) -> Result<WrappedKey> {
+        use aes_gcm::aead::{Aead, Payload};
+        use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
+
+        let cipher = Aes256Gcm::new((&self._key).into());
+        let nonce_bytes: [u8; 12] = rand::random();
+        let mut ciphertext = cipher
+            .encrypt(
+                Nonce::from_slice(&nonce_bytes),
+                Payload {
+                    msg: key,
+                    aad: KEY_WRAP_AAD,
+                },
+            )
+            .map_err(|_| anyhow::anyhow!("local KMS wrapping failed"))?;
+        let mut blob = nonce_bytes.to_vec();
+        blob.append(&mut ciphertext);
+        Ok(WrappedKey {
+            ciphertext: blob,
+            provider: "local".to_owned(),
+            key_id: self.key_id().to_owned(),
+            metadata: serde_json::json!({}),
+        })
     }
 
-    async fn unwrap_key(&self, _wrapped: &WrappedKey) -> Result<[u8; 32]> {
-        Err(anyhow::anyhow!(
-            "experimental local KMS is disabled: authenticated KMS required"
-        ))
+    async fn unwrap_key(&self, wrapped: &WrappedKey) -> Result<[u8; 32]> {
+        use aes_gcm::aead::{Aead, Payload};
+        use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
+
+        anyhow::ensure!(wrapped.provider == "local", "wrapped key provider mismatch");
+        anyhow::ensure!(
+            wrapped.ciphertext.len() >= 12 + 16,
+            "wrapped key is too short"
+        );
+        let (nonce, ciphertext) = wrapped.ciphertext.split_at(12);
+        let cipher = Aes256Gcm::new((&self._key).into());
+        let plaintext = cipher
+            .decrypt(
+                Nonce::from_slice(nonce),
+                Payload {
+                    msg: ciphertext,
+                    aad: KEY_WRAP_AAD,
+                },
+            )
+            .map_err(|_| anyhow::anyhow!("local KMS unwrapping failed"))?;
+        plaintext
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("unwrapped key has invalid length"))
     }
 
     fn provider_name(&self) -> &str {

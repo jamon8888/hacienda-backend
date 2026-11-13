@@ -246,7 +246,9 @@ where
                         signature: String::new(),
                         public_key: String::new(),
                     };
-                    let _ = audit_log.append(record).await;
+                    if audit_log.append(record).await.is_err() {
+                        return Err(ErrorData::internal_error("audit unavailable", None));
+                    }
                 }
                 result?
             }
@@ -276,7 +278,9 @@ where
                         signature: String::new(),
                         public_key: String::new(),
                     };
-                    let _ = audit_log.append(record).await;
+                    if audit_log.append(record).await.is_err() {
+                        return Err(ErrorData::internal_error("audit unavailable", None));
+                    }
                 }
                 result?
             }
@@ -306,7 +310,9 @@ where
                         signature: String::new(),
                         public_key: String::new(),
                     };
-                    let _ = audit_log.append(record).await;
+                    if audit_log.append(record).await.is_err() {
+                        return Err(ErrorData::internal_error("audit unavailable", None));
+                    }
                 }
                 result?
             }
@@ -336,7 +342,9 @@ where
                         signature: String::new(),
                         public_key: String::new(),
                     };
-                    let _ = audit_log.append(record).await;
+                    if audit_log.append(record).await.is_err() {
+                        return Err(ErrorData::internal_error("audit unavailable", None));
+                    }
                 }
                 result?
             }
@@ -366,7 +374,9 @@ where
                         signature: String::new(),
                         public_key: String::new(),
                     };
-                    let _ = audit_log.append(record).await;
+                    if audit_log.append(record).await.is_err() {
+                        return Err(ErrorData::internal_error("audit unavailable", None));
+                    }
                 }
                 result?
             }
@@ -505,17 +515,49 @@ async fn handle_graph_entities(
         let store = engine.lance_store_clone();
         let tenant = tenant_id.to_string();
 
-        let cypher_result =
-            tokio::task::spawn_blocking(move || store.execute_cypher(&tenant, &cypher, max_rows))
-                .await
-                .map_err(|_| ErrorData::internal_error("cypher task failed", None))?
-                .map_err(|_| ErrorData::internal_error("cypher execution failed", None))?;
+        let query_limit = max_rows.saturating_add(1);
+        let cypher_result = tokio::task::spawn_blocking(move || {
+            store.execute_cypher(&tenant, &cypher, query_limit)
+        })
+        .await
+        .map_err(|_| ErrorData::internal_error("cypher task failed", None))?
+        .map_err(|_| ErrorData::internal_error("cypher execution failed", None))?;
 
-        let truncated = cypher_result.rows.len() >= max_rows;
+        let truncated = cypher_result.rows.len() > max_rows;
+        let safe_columns = [
+            "label",
+            "mention_count",
+            "first_seen_chunk",
+            "last_seen_chunk",
+            "doc_chunk_idx",
+        ];
+        let safe_indexes: Vec<(usize, &str)> = cypher_result
+            .columns
+            .iter()
+            .enumerate()
+            .filter_map(|(index, column)| {
+                safe_columns
+                    .iter()
+                    .find(|allowed| **allowed == column)
+                    .map(|allowed| (index, *allowed))
+            })
+            .collect();
+        let columns: Vec<&str> = safe_indexes.iter().map(|(_, column)| *column).collect();
+        let rows: Vec<Vec<&str>> = cypher_result
+            .rows
+            .iter()
+            .take(max_rows)
+            .map(|row| {
+                safe_indexes
+                    .iter()
+                    .map(|(index, _)| row.get(*index).map(String::as_str).unwrap_or("<redacted>"))
+                    .collect()
+            })
+            .collect();
         let json = serde_json::json!({
             "tenant_id": tenant_id,
-            "columns": cypher_result.columns,
-            "rows": cypher_result.rows,
+            "columns": columns,
+            "rows": rows,
             "truncated": truncated,
         })
         .to_string();
@@ -563,9 +605,8 @@ async fn handle_graph_rag(
         let hops = args_map
             .get("hops")
             .and_then(|v| v.as_u64())
-            .map(|v| v as u8)
-            .unwrap_or(2)
-            .min(2);
+            .map(|v| v.clamp(1, 2) as u8)
+            .unwrap_or(2);
         let max_results = args_map
             .get("max_results")
             .and_then(|v| v.as_u64())

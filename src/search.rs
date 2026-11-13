@@ -15,6 +15,8 @@
 //! Returns: tokenized snippets + doc IDs -- never raw PII.
 
 use std::collections::HashMap;
+#[cfg(feature = "basemind")]
+use std::collections::HashSet;
 use std::ops::Bound;
 #[cfg(feature = "rerank")]
 use std::path::{Path, PathBuf};
@@ -62,9 +64,7 @@ struct Reranker {
     /// split produces IDs the model has never seen.
     tokenizer: tokenizers::Tokenizer,
     max_seq_len: usize,
-    /// Kept for API compatibility / future batching; not used in the current
-    /// single-pass implementation.
-    #[allow(dead_code)]
+    /// Maximum number of query/document pairs sent to ONNX at once.
     batch_size: usize,
 }
 
@@ -132,7 +132,12 @@ impl Reranker {
 
     /// Download the model ONNX + tokenizer.json from Hugging Face.
     fn download_model(model_name: &str, cache_dir: &str, model_sha256: Option<&str>) -> Result<()> {
-        let base = format!("https://huggingface.co/BAAI/{}/resolve/main", model_name);
+        let repository = if model_name.contains('/') {
+            model_name.to_owned()
+        } else {
+            format!("BAAI/{model_name}")
+        };
+        let base = format!("https://huggingface.co/{repository}/resolve/main");
         tracing::info!(
             "Downloading reranker model {} into {}",
             model_name,
@@ -159,7 +164,14 @@ impl Reranker {
     /// then atomically rename into place. A partial or failed download never
     /// leaves a corrupt file that a later run would trust.
     fn download_file(url: &str, dest: &Path, expected_sha256: Option<&str>) -> Result<()> {
-        let response = reqwest::blocking::get(url)
+        let client = reqwest::blocking::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(30))
+            .user_agent("hacienda-backend/reranker")
+            .build()
+            .map_err(|e| anyhow::anyhow!("Failed to create download client: {}", e))?;
+        let response = client
+            .get(url)
+            .send()
             .map_err(|e| anyhow::anyhow!("Failed to download {}: {}", url, e))?;
         if !response.status().is_success() {
             anyhow::bail!("Download failed with status {}: {}", response.status(), url);
@@ -168,8 +180,10 @@ impl Reranker {
         let part_path = dest.with_extension("part");
         let mut file = std::fs::File::create(&part_path)
             .map_err(|e| anyhow::anyhow!("Failed to create {}: {}", part_path.display(), e))?;
-        std::io::copy(&mut std::io::BufReader::new(response), &mut file)
-            .map_err(|e| anyhow::anyhow!("Failed to stream {}: {}", url, e))?;
+        if let Err(e) = std::io::copy(&mut std::io::BufReader::new(response), &mut file) {
+            let _ = std::fs::remove_file(&part_path);
+            return Err(anyhow::anyhow!("Failed to stream {}: {}", url, e));
+        }
         file.sync_all().ok();
 
         if let Some(expected) = expected_sha256 {
@@ -223,7 +237,9 @@ impl Reranker {
             let ids = encoding.get_ids();
             let mask = encoding.get_attention_mask();
             for i in 0..self.max_seq_len {
-                input_ids.push(*ids.get(i).unwrap_or(&0) as i64);
+                // XLM-R uses token id 1 for padding. Padding with the unknown
+                // token (0) changes the model input and can skew scores.
+                input_ids.push(*ids.get(i).unwrap_or(&1) as i64);
                 attention_mask.push(*mask.get(i).unwrap_or(&0) as i64);
             }
         }
@@ -453,8 +469,18 @@ impl SearchEngine {
         let tenant_id_field = schema_builder.add_text_field("tenant_id", STRING | STORED);
         let schema = schema_builder.build();
 
-        // Create in-memory Tantivy index for BM25
-        let tantivy_index = Index::create_in_ram(schema.clone());
+        // Persist BM25 per tenant so configured storage paths are honored and
+        // a restart cannot silently discard the index.
+        let tantivy_dir = config.tantivy_dir(Some(tenant_id));
+        std::fs::create_dir_all(&tantivy_dir)
+            .map_err(|e| CliError::Other(format!("create tantivy directory: {e}")))?;
+        let tantivy_index = if tantivy_dir.join("meta.json").exists() {
+            Index::open_in_dir(&tantivy_dir)
+                .map_err(|e| CliError::Other(format!("open tantivy index: {e}")))?
+        } else {
+            Index::create_in_dir(&tantivy_dir, schema.clone())
+                .map_err(|e| CliError::Other(format!("create tantivy index: {e}")))?
+        };
 
         #[cfg(feature = "basemind")]
         let lance_store = {
@@ -557,6 +583,18 @@ impl SearchEngine {
         connector: &str,
         tier: SensitivityTier,
     ) -> Result<(), CliError> {
+        // Remove an existing document from every lane before applying the
+        // sensitivity decision. A document can transition from indexable to
+        // HardBlock, and that transition must not leave stale searchable data.
+        let mut index_writer: IndexWriter = self.tantivy_index.writer(50_000_000)?;
+        index_writer.delete_term(Term::from_field_text(self.doc_id_field, doc_id));
+        index_writer.commit()?;
+
+        #[cfg(feature = "basemind")]
+        self.lance_store
+            .replace_document(&self.tenant_id, doc_id, Vec::new())
+            .map_err(|e| CliError::Other(format!("lance store: {e}")))?;
+
         // Fail closed: HardBlock content never enters any index.
         if !tier.allows_indexing() {
             return Ok(());
@@ -568,9 +606,6 @@ impl SearchEngine {
 
         // Index in Tantivy (BM25) - ALWAYS
         let mut index_writer: IndexWriter = self.tantivy_index.writer(50_000_000)?;
-        // Replace any previous entry for this doc_id instead of appending
-        // a duplicate (doc_id is a STRING field, so the term is exact).
-        index_writer.delete_term(tantivy::Term::from_field_text(self.doc_id_field, doc_id));
         let mut doc = tantivy::TantivyDocument::default();
         doc.add_text(self.text_field, &projected_str);
         doc.add_text(self.doc_id_field, doc_id);
@@ -635,18 +670,33 @@ impl SearchEngine {
 
         // 1. BM25 search via Tantivy - ALWAYS
         let bm25_hits = self.bm25_search_lane(&params, top_k).await?;
+        #[cfg(feature = "basemind")]
+        let allowed_ids = params.filter.as_ref().map(|_| {
+            bm25_hits
+                .iter()
+                .map(|hit| hit.doc_id.clone())
+                .collect::<HashSet<_>>()
+        });
         all_lane_hits.extend(bm25_hits);
 
         // 2. Vector + lexical lanes via basemind - OPTIONAL, only when
         // documents.embed is enabled (matches the indexing side).
         #[cfg(feature = "basemind")]
         if self.embedder.is_some() {
-            let vector_hits = self.vector_search_lane(&params, &scope, top_k).await?;
-            all_lane_hits.extend(vector_hits);
-
-            let lexical_hits = self
+            let mut vector_hits = self.vector_search_lane(&params, &scope, top_k).await?;
+            let mut lexical_hits = self
                 .lexical_search_lane(&params, scope_predicate, top_k)
                 .await?;
+            if let Some(allowed_ids) = allowed_ids {
+                // Lance's public search APIs do not expose the Tantivy
+                // connector/timestamp fields. When a caller supplies a
+                // filter, fail closed by intersecting every lane with the
+                // metadata-filtered BM25 set rather than leaking unfiltered
+                // vector/FTS hits.
+                vector_hits.retain(|hit| allowed_ids.contains(&hit.doc_id));
+                lexical_hits.retain(|hit| allowed_ids.contains(&hit.doc_id));
+            }
+            all_lane_hits.extend(vector_hits);
             all_lane_hits.extend(lexical_hits);
         }
 
@@ -1068,11 +1118,23 @@ impl SearchEngine {
 
             let scores = tokio::task::spawn_blocking(move || {
                 let reranker = Reranker::get_or_init(&config)?;
-                let doc_refs: Vec<&str> = snippets.iter().map(String::as_str).collect();
-                reranker.predict(&query, &doc_refs)
+                let mut scores = Vec::with_capacity(snippets.len());
+                for batch in snippets.chunks(reranker.batch_size) {
+                    let doc_refs: Vec<&str> = batch.iter().map(String::as_str).collect();
+                    scores.extend(reranker.predict(&query, &doc_refs)?);
+                }
+                Ok::<_, anyhow::Error>(scores)
             })
             .await
-            .map_err(|e| anyhow::anyhow!("rerank task failed: {e}"))??;
+            .map_err(|e| anyhow::anyhow!("rerank task failed: {e}"))?;
+
+            let scores = match scores {
+                Ok(scores) => scores,
+                Err(error) => {
+                    tracing::warn!(%error, "reranking unavailable; returning fused results");
+                    return Ok(results);
+                }
+            };
 
             // Combine results with new scores (predict validated the count).
             let mut reranked: Vec<SearchResult> = results

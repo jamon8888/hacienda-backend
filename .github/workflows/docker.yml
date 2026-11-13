@@ -1,6 +1,7 @@
 name: Docker
 
 on:
+  workflow_call:
   push:
     branches: [main]
     tags:
@@ -46,7 +47,7 @@ jobs:
           tags: |
             type=ref,event=branch
             type=ref,event=pr
-            type=sha
+            type=sha,format=long
             type=raw,value=latest,enable={{is_default_branch}}
 
       - name: Build and push
@@ -68,10 +69,10 @@ jobs:
     steps:
       - name: Pull test image
         run: |
-          docker pull ghcr.io/${{ github.repository }}:${{ github.sha }}
+          docker pull ghcr.io/${{ github.repository }}:sha-${{ github.sha }}
       - name: Test CLI
         run: |
-          docker run --rm ghcr.io/${{ github.repository }}:${{ github.sha }} --help
+          docker run --rm ghcr.io/${{ github.repository }}:sha-${{ github.sha }} --help
       - name: Test MCP server
         run: |
-          timeout 10 docker run --rm ghcr.io/${{ github.repository }}:${{ github.sha }} mcp serve --help || true
+          timeout 10 docker run --rm ghcr.io/${{ github.repository }}:sha-${{ github.sha }} mcp --transport stdio --help

@@ -21,16 +21,7 @@ use tracing::warn;
 ///
 /// Audit records are metadata-only: arguments are reduced to counts and result
 /// details are reduced to safe status codes before they cross the append boundary.
-pub const MCP_AUDIT_TOOLS: &[&str] = &[
-    "search",
-    "sync",
-    "status",
-    "attach_local_doc",
-    "request_human_disclosure",
-    "disclosure_status",
-    "graph_entities",
-    "graph_rag",
-];
+pub const MCP_AUDIT_TOOLS: &[&str] = &["search", "sync", "status", "graph_entities", "graph_rag"];
 
 /// Audit record for a single MCP tool call.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -58,14 +49,17 @@ fn sanitize_record(mut record: AuditRecord) -> Result<AuditRecord> {
         return Err(anyhow::anyhow!("audit tool is not allowlisted"));
     }
 
-    record.arguments = serde_json::json!({
-        "argument_count": match &record.arguments {
-            serde_json::Value::Object(fields) => fields.len(),
-            serde_json::Value::Array(values) => values.len(),
-            serde_json::Value::Null => 0,
-            _ => 1,
-        },
-    });
+    let argument_count = match &record.arguments {
+        serde_json::Value::Object(fields) => fields
+            .get("argument_count")
+            .and_then(serde_json::Value::as_u64)
+            .map(|count| count as usize)
+            .unwrap_or(fields.len()),
+        serde_json::Value::Array(values) => values.len(),
+        serde_json::Value::Null => 0,
+        _ => 1,
+    };
+    record.arguments = serde_json::json!({ "argument_count": argument_count });
     record.result_summary = if record.result_summary.trim_start().starts_with("OK") {
         "OK".to_string()
     } else {
@@ -223,8 +217,13 @@ impl AuditLog {
             if line.trim().is_empty() {
                 continue;
             }
-            let record: AuditRecord = serde_json::from_str(line)
-                .map_err(|e| anyhow::anyhow!("parse audit record: {}", e))?;
+            let record: AuditRecord = match serde_json::from_str(line) {
+                Ok(record) => record,
+                Err(error) => {
+                    errors.push(format!("Line {}: parse error ({})", line_num + 1, error));
+                    continue;
+                }
+            };
             expected_seq += 1;
             if record.sequence != expected_seq {
                 errors.push(format!(
@@ -238,14 +237,35 @@ impl AuditLog {
             let mut to_verify = record.clone();
             to_verify.signature = String::new();
             to_verify.public_key = String::new();
-            let canonical = serde_json::to_vec(&to_verify)
-                .map_err(|e| anyhow::anyhow!("serialize for verification: {}", e))?;
-            let sig_bytes = B64
-                .decode(&record.signature)
-                .map_err(|e| anyhow::anyhow!("decode signature: {}", e))?;
-            let sig_array: [u8; 64] = sig_bytes
-                .try_into()
-                .map_err(|_| anyhow::anyhow!("invalid signature length"))?;
+            let canonical = match serde_json::to_vec(&to_verify) {
+                Ok(canonical) => canonical,
+                Err(error) => {
+                    errors.push(format!(
+                        "Line {}: serialization error ({})",
+                        line_num + 1,
+                        error
+                    ));
+                    continue;
+                }
+            };
+            let sig_bytes = match B64.decode(&record.signature) {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    errors.push(format!(
+                        "Line {}: signature decode error ({})",
+                        line_num + 1,
+                        error
+                    ));
+                    continue;
+                }
+            };
+            let sig_array: [u8; 64] = match sig_bytes.try_into() {
+                Ok(bytes) => bytes,
+                Err(_) => {
+                    errors.push(format!("Line {}: invalid signature length", line_num + 1));
+                    continue;
+                }
+            };
             let sig = Signature::from_bytes(&sig_array);
             // Verify against the log's own trusted key, never against the
             // public_key stored inside the record: an attacker with write access

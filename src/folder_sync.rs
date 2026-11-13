@@ -15,7 +15,6 @@ use notify::{Config, Event, EventKind, RecommendedWatcher, Watcher};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
 use tokio::task::JoinHandle;
 use xberg::RedactionConfig;
 
@@ -321,9 +320,10 @@ impl FolderSync {
 
     /// Manual refresh: process all files once, clearing the index first (full rebuild).
     pub async fn manual_refresh(&self) {
-        self.trigger_full_rebuild("manual refresh".to_owned());
-        // Wait for processing (in real impl, would await a completion signal)
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        // A one-shot refresh has no running sync loop to consume an event.
+        // Execute the rebuild directly so the command does not report success
+        // before any files have been processed.
+        Self::full_rebuild(&self.root, &self.config, &self.indexed).await;
     }
 
     /// One-shot incremental refresh: index new/changed files without clearing.
@@ -332,11 +332,10 @@ impl FolderSync {
             while let Ok(Some(entry)) = entries.next_entry().await {
                 let path = entry.path();
                 if path.is_file() {
-                    let _ = self.event_tx.try_send(SyncEvent::FileChanged { path });
+                    Self::handle_file_changed(&self.root, &self.config, &self.indexed, path).await;
                 }
             }
         }
-        tokio::time::sleep(Duration::from_millis(100)).await;
     }
 
     /// Get current indexed documents (for status/debug).

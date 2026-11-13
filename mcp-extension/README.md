@@ -1,6 +1,6 @@
 # Hacienda Backend MCP Extension for Claude Desktop
 
-This extension provides MCP (Model Context Protocol) integration for the hacienda-backend binary, enabling Claude Desktop to access code navigation, document retrieval, git intelligence, memory, and agent coordination capabilities.
+This extension provides MCP (Model Context Protocol) integration for the hacienda-backend binary, exposing token-safe search, sync, status, and graph retrieval.
 
 > This extension exposes tokenized snippets and metadata only. It does not provide raw rehydration or a recovery path.
 
@@ -23,7 +23,7 @@ Then add to your Claude Desktop configuration:
   "mcpServers": {
     "hacienda-backend": {
       "command": "npx",
-      "args": ["hacienda-backend", "mcp", "serve", "--transport", "stdio"]
+      "args": ["hacienda-backend"]
     }
   }
 }
@@ -70,9 +70,6 @@ Then add to Claude Desktop config:
 | `search` | Hybrid search (BM25 + Vector + Lexical + RRF) over indexed documents |
 | `sync` | Trigger incremental or full index rebuild |
 | `status` | Index status and engine readiness metadata |
-| `attach_local_doc` | Attach a local document through the disclosure policy |
-| `request_human_disclosure` | Request human approval for disclosure |
-| `disclosure_status` | Disclosure approval status metadata |
 | `graph_entities` | Read-only Cypher query over the entity graph |
 | `graph_rag` | GraphRAG: hybrid retrieval via entity graph expansion |
 
@@ -88,7 +85,7 @@ Resource reads return status codes and metadata only; the extension never rehydr
 The extension connects to the backend using the MCP client SDK. By default it starts:
 
 ```bash
-hacienda-backend mcp serve --transport stdio
+hacienda-backend mcp --transport stdio
 ```
 
 For a configured Streamable HTTP endpoint, set `HACIENDA_MCP_URL` in the extension environment. The extension uses that endpoint instead of spawning a subprocess.
@@ -100,9 +97,9 @@ The extension looks for the `hacienda-backend` binary in these locations (in ord
 1. `./target/release/hacienda-backend` (relative to extension)
 2. `./target/debug/hacienda-backend` (relative to extension)
 3. `/usr/local/bin/hacienda-backend`
-3. `/opt/homebrew/bin/hacienda-backend`
-3. `/usr/bin/hacienda-backend`
-4. From PATH (`hacienda-backend`)
+4. `/opt/homebrew/bin/hacienda-backend`
+5. `/usr/bin/hacienda-backend`
+6. From PATH (`hacienda-backend`)
 
 ## Development
 

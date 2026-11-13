@@ -1,7 +1,7 @@
 {
   "name": "hacienda-backend",
   "version": "0.1.0",
-  "description": "Hacienda Backend MCP Extension for Claude Desktop - development-only, noncompliant MCP integration for token-safe search, sync and status. Raw rehydration is not supported; do not use this extension as a recovery path. Production use requires token-only gateway/sidecar integration.",
+  "description": "Hacienda Backend MCP Extension for Claude Desktop. Exposes token-safe search, sync, status, and graph retrieval; raw rehydration is not supported.",
   "author": "jamon8888",
   "license": "MIT",
   "homepage": "https://github.com/jamon8888/hacienda-backend",

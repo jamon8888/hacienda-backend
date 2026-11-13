@@ -32,6 +32,8 @@ pub enum RehydrationError {
     UserCancelled,
     #[error("vault custody failed: {0}")]
     Custody(String),
+    #[error("unsafe output path: {0}")]
+    UnsafeOutput(String),
 }
 
 /// Result of a rehydration operation (for audit logging).
@@ -165,6 +167,23 @@ fn write_output(content: &str, output_path: Option<&Path>) -> Result<(), Rehydra
     }
 }
 
+fn validate_output_path(path: &Path) -> Result<(), RehydrationError> {
+    let path_text = path.to_string_lossy();
+    if path_text == "-" || path_text == "/dev/stdout" || path_text == "/proc/self/fd/1" {
+        return Err(RehydrationError::UnsafeOutput(
+            "stdout and special device aliases are not permitted".to_owned(),
+        ));
+    }
+    if let Ok(metadata) = fs::symlink_metadata(path) {
+        if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
+            return Err(RehydrationError::UnsafeOutput(
+                "output must be a regular, non-symlink file".to_owned(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Main rehydration entry point.
 pub async fn run_rehydrate(
     args: RehydrateArgs,
@@ -172,49 +191,50 @@ pub async fn run_rehydrate(
 ) -> Result<RehydrationAuditRecord, RehydrationError> {
     let timestamp = chrono::Utc::now().to_rfc3339();
 
-    if args.output.is_none() {
-        return Err(RehydrationError::UserCancelled);
-    }
+    validate_output_path(&args.output)?;
     if args.yes && !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
         return Err(RehydrationError::UserCancelled);
     }
-    let manifest_path = args.manifest.as_ref().ok_or_else(|| {
-        RehydrationError::ManifestParse(
-            "manifest is required for independent vault binding verification".to_owned(),
-        )
-    })?;
-    // Verify requested manifest/document metadata before asking custody to decrypt.
-    let vault_map = load_vault_map_verified(
-        &args.vault_map,
-        manifest_path,
-        args.document.as_deref(),
-        vault_passphrase,
-    )?;
+    let manifest: RehydrationManifest = serde_json::from_slice(&load_manifest(&args.manifest)?)
+        .map_err(|e| RehydrationError::ManifestParse(e.to_string()))?;
+    if args.document.is_none() {
+        return Err(RehydrationError::ManifestParse(
+            "original document is required for independent vault binding verification".to_owned(),
+        ));
+    }
 
-    if let Some(entity_token) = args.entity {
+    if let Some(entity_token) = args.entity.as_deref() {
         // Single entity rehydration
         if !args.yes {
-            let confirmed = confirm_rehydration(&entity_token, false)?;
+            let confirmed = confirm_rehydration(entity_token, false)?;
             if !confirmed {
                 return Err(RehydrationError::UserCancelled);
             }
         }
 
-        let original = rehydrate_entity(&vault_map, &entity_token)?;
-        write_output(&original, args.output.as_deref())?;
+        // Confirmation and independent path validation happen before custody
+        // access or decryption.
+        let vault_map = load_vault_map_verified(
+            &args.vault_map,
+            &args.manifest,
+            args.document.as_deref(),
+            vault_passphrase,
+        )?;
+        let original = rehydrate_entity(&vault_map, entity_token)?;
+        write_output(&original, Some(&args.output))?;
 
         Ok(RehydrationAuditRecord {
             timestamp,
             operation: "entity".to_owned(),
-            scope: entity_token,
-            fingerprint: String::new(), // TODO: extract from manifest
+            scope: entity_token.to_owned(),
+            fingerprint: manifest.fingerprint.as_str().to_owned(),
             success: true,
             error: None,
         })
-    } else if let Some(doc_id) = args.doc_id {
+    } else if let Some(doc_id) = args.doc_id.as_deref() {
         // Full document rehydration
         if !args.yes {
-            let confirmed = confirm_rehydration(&doc_id, true)?;
+            let confirmed = confirm_rehydration(doc_id, true)?;
             if !confirmed {
                 return Err(RehydrationError::UserCancelled);
             }
@@ -236,16 +256,16 @@ pub async fn run_export_recovery(
     args: ExportRecoveryArgs,
     vault_passphrase: &str,
 ) -> Result<(), RehydrationError> {
-    let manifest_bytes = load_manifest(&args.manifest)?;
-    let vault_map =
-        load_vault_map_verified(&args.vault_map, &args.manifest, None, vault_passphrase)?;
-
     if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
         return Err(RehydrationError::UserCancelled);
     }
     if !confirm_rehydration("recovery export", false)? {
         return Err(RehydrationError::UserCancelled);
     }
+    validate_output_path(&args.output)?;
+    let manifest_bytes = load_manifest(&args.manifest)?;
+    let vault_map =
+        load_vault_map_verified(&args.vault_map, &args.manifest, None, vault_passphrase)?;
     let provider =
         default_vault_key_provider().map_err(|e| RehydrationError::Decryption(e.to_string()))?;
     let plaintext = serde_json::json!({
@@ -268,19 +288,18 @@ pub async fn run_export_recovery(
 
 /// Retrieve vault passphrase from macOS Keychain (stub for now).
 pub fn get_vault_passphrase() -> Result<String, RehydrationError> {
-    // Preserve the legacy caller contract without returning custody material.
-    default_vault_key_provider().map_err(|e| RehydrationError::Custody(e.to_string()))?;
+    // Custody is intentionally resolved only after an interactive operation
+    // has been confirmed and its independent bindings have been checked.
     Ok(String::new())
 }
 
 /// Log rehydration audit record.
 pub fn log_audit(record: &RehydrationAuditRecord) -> Result<(), RehydrationError> {
     // Metadata-only audit: never emit tokens, document IDs, values, arguments, or errors.
-    let scope_hash = blake3::hash(record.scope.as_bytes()).to_hex().to_string();
     let json = serde_json::json!({
         "timestamp": record.timestamp,
         "operation": record.operation,
-        "scope_hash": scope_hash,
+        "scope_present": !record.scope.is_empty(),
         "fingerprint": record.fingerprint,
         "success": record.success,
     });

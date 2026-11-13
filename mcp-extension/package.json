@@ -3,6 +3,9 @@
   "version": "0.1.0",
   "description": "Hacienda Backend MCP Extension for Claude Desktop",
   "main": "dist/index.js",
+  "bin": {
+    "hacienda-backend": "dist/index.js"
+  },
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
@@ -28,17 +31,9 @@
       "graphrag"
     ],
     "tools": [
-      "code",
-      "graph",
-      "git",
-      "memory",
-      "admin",
-      "web",
-      "agents",
-      "workspace",
-      "shell",
-      "vault",
-      "redact_text",
+      "search",
+      "sync",
+      "status",
       "graph_entities",
       "graph_rag"
     ],

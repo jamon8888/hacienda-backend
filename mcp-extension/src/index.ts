@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 /**
  * Hacienda Backend MCP Extension for Claude Desktop.
  * Bridges the extension-facing MCP server to hacienda's MCP server transport.
@@ -68,21 +69,6 @@ const TOOLS = [
     inputSchema: { type: "object", properties: {} },
   },
   {
-    name: "attach_local_doc",
-    description: "Attach a local document through the backend disclosure policy.",
-    inputSchema: { type: "object", properties: { path: { type: "string" } }, required: ["path"] },
-  },
-  {
-    name: "request_human_disclosure",
-    description: "Request human approval for a disclosure operation.",
-    inputSchema: { type: "object", properties: { request_id: { type: "string" } }, required: ["request_id"] },
-  },
-  {
-    name: "disclosure_status",
-    description: "Return disclosure approval status metadata.",
-    inputSchema: { type: "object", properties: { request_id: { type: "string" } } },
-  },
-  {
     name: "graph_entities",
     description: "Read-only entity graph query; returns tokenized metadata only.",
     inputSchema: { type: "object", properties: { tenant_id: { type: "string" }, cypher: { type: "string" }, max_rows: { type: "number" } }, required: ["tenant_id", "cypher"] },
@@ -112,22 +98,21 @@ async function getBackendClient(): Promise<Client> {
     ? new StreamableHTTPClientTransport(new URL(endpoint))
     : new StdioClientTransport({
         command: BINARY_PATH,
-        args: ["mcp", "serve", "--transport", "stdio"],
+        args: ["mcp", "--transport", "stdio"],
         stderr: "pipe",
       });
   await backendClient.connect(backendTransport);
   return backendClient;
 }
 
-/** Only expose fixed status codes and aggregate metadata; never backend payloads or diagnostics. */
+/** Preserve token-safe MCP content while removing backend diagnostics on errors. */
 function safeResult(result: unknown, code = "OK"): Record<string, unknown> {
   const value = result as { content?: unknown[]; isError?: boolean; structuredContent?: unknown } | null;
+  if (value?.isError) return { code: "E_BACKEND_TOOL" };
   return {
-    code: value?.isError ? "E_BACKEND_TOOL" : code,
-    metadata: {
-      content_items: Array.isArray(value?.content) ? value.content.length : 0,
-      has_structured_content: value?.structuredContent !== undefined,
-    },
+    code,
+    content: Array.isArray(value?.content) ? value.content : [],
+    ...(value?.structuredContent === undefined ? {} : { structured_content: value.structuredContent }),
   };
 }
 

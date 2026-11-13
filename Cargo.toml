@@ -9,7 +9,7 @@ publish = true
 [features]
 default = ["bm25"]
 bm25 = []
-# Vector search via basemind's LanceStore (patched xberg 1.3.10 in /Users/macbook/xberg-patched)
+# Vector search via basemind's LanceStore.
 basemind = ["dep:basemind", "dep:lancedb", "dep:arrow"]
 vector = ["basemind"]
 # Cross-encoder reranking with ort (bge-reranker-v2-m3 ONNX)
@@ -79,10 +79,7 @@ ort = { version = "^2.0.0-rc.13", default-features = false, features = ["ndarray
 [dev-dependencies]
 tokio = { version = "1.54.1", features = ["macros", "rt-multi-thread"] }
 zip = "9.0.2"
-xberg = { version = "=1.3.10", features = ["embeddings", "redaction", "redaction-rehydrate", "formats"] }
-
-# NOTE: no [patch.crates-io] section here on purpose — machine-local overrides live
-# in an untracked .cargo/config.toml (see that file) so this manifest stays portable.
+xberg = { version = "=1.3.10", features = ["embeddings", "redaction", "redaction-rehydrate", "formats-no-heic"] }
 
 [profile.ci]
 inherits = "dev"

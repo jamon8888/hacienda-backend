@@ -30,7 +30,6 @@ production behavior.
 - [Architecture overview](ARCHITECTURE.md)
 - [Glossary](GLOSSARY.md)
 - [Architecture spec](docs/spec.md)
-- [Production MVP readiness plan](.openbitfun/plans/production-mvp-readiness.plan.md)
 - [ADR-0001 Composition contract](docs/adr/0001-composition-contract.md)
 - [ADR-0002 Dual store under one engine-era fingerprint](docs/adr/0002-dual-store-engine-era-fingerprint.md)
 - [ADR-0003 The human-ward rehydration invariant](docs/adr/0003-human-ward-invariant.md)
